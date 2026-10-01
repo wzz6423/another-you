@@ -37,6 +37,8 @@ Direct execution supports the main UI and sidecar, but system notifications requ
 2. Open **设置 → 本地模型**. Enter the service URL and model name. The usual Ollama URL is `http://127.0.0.1:11434/v1`.
 3. Select **保存并重新连接**, then submit a prompt or generate a draft from a suggestion to test the connection.
 
+Settings opens in a separate macOS window from the sidebar, menu bar, or **⌘,**. It can be minimized or closed while the main window remains usable.
+
 The app does not install models or start their services. Saving settings only validates and writes the configuration; a successful model request is the availability check. The settings UI accepts `localhost`, `127.0.0.1`, and `::1` loopback addresses only.
 
 Saving these settings replaces the model section with `provider=local` and `temperature=0.2`, resets privacy to `strict-local`, clears remote-host authorization, and disables `tools.network`. It preserves the content-storage preferences. Remote model settings require manual configuration and a process environment containing the selected key; see [configuration](../../docs/configuration.md). Saving through this local-model UI will overwrite that remote configuration.

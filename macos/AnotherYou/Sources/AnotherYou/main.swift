@@ -31,8 +31,17 @@ struct AnotherYouApp: App {
         }
         .defaultSize(width: 1040, height: 780)
         .windowStyle(.hiddenTitleBar)
+        .commands {
+            CommandGroup(replacing: .appSettings) {
+                Button("设置…", action: showSettings).keyboardShortcut(",")
+            }
+        }
 
-        Settings { SettingsView(store: store) }
+        Window("设置", id: "settings") {
+            SettingsView(store: store)
+        }
+        .defaultSize(width: 540, height: 460)
+        .windowResizability(.contentMinSize)
 
         MenuBarExtra("Another You", systemImage: "circle.lefthalf.filled") {
             Text(store.paused && store.isConnected ? "主动建议已暂停" : store.connection.label)
@@ -45,9 +54,14 @@ struct AnotherYouApp: App {
             Button(store.paused ? "恢复主动建议" : "暂停主动建议") { store.togglePause() }
                 .disabled(!store.isConnected || store.isChangingPause)
             Button("刷新连接") { store.refresh() }.disabled(store.connection == .starting || store.isRestarting)
-            SettingsLink { Text("设置…") }
+            Button("设置…", action: showSettings)
             Divider()
             Button("退出 Another You") { NSApplication.shared.terminate(nil) }.keyboardShortcut("q")
         }
+    }
+
+    private func showSettings() {
+        openWindow(id: "settings")
+        NSApplication.shared.activate(ignoringOtherApps: true)
     }
 }

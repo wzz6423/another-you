@@ -12,29 +12,27 @@ private enum SidebarItem: String, CaseIterable, Identifiable {
 public struct MainWindowView: View {
     @ObservedObject private var store: AssistantStore
     @State private var selectedItem: SidebarItem = .today
-    @State private var showingSettings = false
+    @Environment(\.openWindow) private var openWindow
 
     public init(store: AssistantStore) { self.store = store }
 
     public var body: some View {
         NavigationSplitView {
-            SidebarView(store: store, selection: $selectedItem) { showingSettings = true }
+            SidebarView(selection: $selectedItem) { openWindow(id: "settings") }
         } detail: {
             switch selectedItem {
-            case .today: DashboardView(store: store) { showingSettings = true }
+            case .today: DashboardView(store: store) { openWindow(id: "settings") }
             case .history: HistoryView(store: store)
             }
         }
         .navigationSplitViewStyle(.balanced)
         .frame(minWidth: 780, minHeight: 580)
-        .sheet(isPresented: $showingSettings) { SettingsView(store: store) }
         .task { store.connect() }
     }
 }
 
 @MainActor
 private struct SidebarView: View {
-    @ObservedObject var store: AssistantStore
     @Binding var selection: SidebarItem
     let onSettings: () -> Void
 
@@ -66,14 +64,9 @@ private struct SidebarView: View {
             }
             .padding(.horizontal, 12)
             Spacer()
-            VStack(alignment: .leading, spacing: 15) {
-                Label(store.paused && store.isConnected ? "主动建议已暂停" : store.connection.label,
-                      systemImage: store.isConnected ? "checkmark.circle" : "circle.dotted")
-                    .font(.system(size: 11)).foregroundStyle(.secondary)
-                Button(action: onSettings) { Label("设置", systemImage: "slider.horizontal.3") }
-                    .buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(.secondary)
-            }
-            .padding(20)
+            Button(action: onSettings) { Label("设置", systemImage: "slider.horizontal.3") }
+                .buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(.secondary)
+                .padding(20)
         }
         .frame(minWidth: 205, idealWidth: 228, maxWidth: 250)
         .background(Color.anotherSidebar)
@@ -93,8 +86,10 @@ private struct DashboardView: View {
                     VStack(alignment: .leading, spacing: 10) {
                         Text(store.isConnected ? "连接你的本地模型" : store.connection.label)
                             .font(.system(size: 14, weight: .semibold))
-                        Text(store.isConnected ? "主动建议由本地规则触发。连接 Ollama 等兼容服务后，可以生成草稿、一起梳理想法。" : store.statusMessage)
-                            .font(.system(size: 12)).foregroundStyle(.secondary).textSelection(.enabled)
+                        if !store.isConnected {
+                            Text(store.statusMessage)
+                                .font(.system(size: 12)).foregroundStyle(.secondary).textSelection(.enabled)
+                        }
                         HStack {
                             Button("模型设置", action: onSettings)
                             if !store.isConnected { Button("重新连接") { store.refresh() }.disabled(store.connection == .starting || store.isRestarting) }
@@ -104,9 +99,9 @@ private struct DashboardView: View {
                     .background(.background, in: RoundedRectangle(cornerRadius: 16))
                 }
                 HStack(spacing: 12) {
-                    MetricTile(title: "等待决定", value: "\(store.pendingCount)", caption: "按你的节奏处理", icon: "tray")
-                    MetricTile(title: "生成的草稿", value: "\(store.completedCount)", caption: "由你决定下一步", icon: "doc.text")
-                    MetricTile(title: "主动建议", value: store.isConnected ? (store.paused ? "已暂停" : "已开启") : "未连接", caption: "仅使用时间和闲置信号", icon: "waveform.path")
+                    MetricTile(title: "等待决定", value: "\(store.pendingCount)", icon: "tray")
+                    MetricTile(title: "生成的草稿", value: "\(store.completedCount)", icon: "doc.text")
+                    MetricTile(title: "主动建议", value: store.isConnected ? (store.paused ? "已暂停" : "已开启") : "未连接", icon: "waveform.path")
                 }
                 VStack(alignment: .leading, spacing: 14) {
                     SectionHeading(title: "值得你看一眼", subtitle: "一条建议，一个由你决定的下一步")
@@ -171,7 +166,6 @@ private struct HeroHeader: View {
 private struct MetricTile: View {
     let title: String
     let value: String
-    let caption: String
     let icon: String
 
     var body: some View {
@@ -182,7 +176,6 @@ private struct MetricTile: View {
                 Image(systemName: icon).font(.system(size: 12)).foregroundStyle(Color.anotherAccent)
             }
             Text(value).font(.system(size: 22, weight: .semibold, design: .rounded)).foregroundStyle(Color.anotherInk)
-            Text(caption).font(.system(size: 10)).foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading).padding(16)
         .background(.background, in: RoundedRectangle(cornerRadius: 16))
@@ -191,11 +184,11 @@ private struct MetricTile: View {
 
 private struct SectionHeading: View {
     let title: String
-    let subtitle: String
+    var subtitle: String? = nil
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             Text(title).font(.system(size: 17, weight: .semibold, design: .rounded)).foregroundStyle(Color.anotherInk)
-            Text(subtitle).font(.system(size: 12)).foregroundStyle(.secondary)
+            if let subtitle { Text(subtitle).font(.system(size: 12)).foregroundStyle(.secondary) }
         }
     }
 }
@@ -247,7 +240,6 @@ private struct ProactiveCardView: View {
                     Spacer()
                 }
                 .controlSize(.small).disabled(busy || !connected)
-                if !modelConfigured { Text("连接本地模型后可以生成草稿。").font(.system(size: 11)).foregroundStyle(.secondary) }
             }
             if let date = card.snoozedUntil, card.state == .snoozed {
                 Text("将在 \(date.formatted(date: .omitted, time: .shortened)) 再次提醒。")
@@ -266,7 +258,7 @@ private struct PromptView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            SectionHeading(title: "也可以一起想想", subtitle: store.modelMessage)
+            SectionHeading(title: "也可以一起想想")
             ForEach(store.conversation) { message in
                 VStack(alignment: .leading, spacing: 10) {
                     Text(message.prompt).font(.system(size: 13, weight: .medium)).textSelection(.enabled)
@@ -306,7 +298,7 @@ private struct HistoryView: View {
             VStack(alignment: .leading, spacing: 20) {
                 SectionHeading(title: "活动记录", subtitle: "每次建议、决定和生成，留有依据")
                 if store.activityHistory.isEmpty {
-                    Text("还没有活动记录。Agent 的真实事件会出现在这里。")
+                    Text("还没有活动记录。")
                         .font(.system(size: 13)).foregroundStyle(.secondary).padding(.vertical, 20)
                 }
                 LazyVStack(spacing: 10) {
@@ -345,7 +337,6 @@ private struct HistoryView: View {
 
 @MainActor
 public struct SettingsView: View {
-    @Environment(\.dismiss) private var dismiss
     @ObservedObject private var store: AssistantStore
     @State private var draft: AgentSettings
     @State private var saved = false
@@ -356,49 +347,36 @@ public struct SettingsView: View {
     }
 
     public var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Text("设置").font(.system(size: 18, weight: .semibold))
-                Spacer()
-                Button("完成") { dismiss() }.keyboardShortcut(.cancelAction)
-            }
-            .padding(22)
-            Form {
-                Section {
-                    TextField("服务地址", text: $draft.endpoint)
-                    TextField("模型名称", text: $draft.model, prompt: Text("例如 qwen3:8b"))
-                    HStack {
-                        Button(store.isRestarting ? "正在重连…" : "保存并重新连接") {
-                            Task { saved = await store.saveSettings(draft) }
-                        }
-                        .disabled(store.isRestarting)
-                        if saved && store.settingsError == nil { Text("配置已保存").font(.caption).foregroundStyle(.secondary) }
+        Form {
+            Section {
+                TextField("服务地址", text: $draft.endpoint)
+                TextField("模型名称", text: $draft.model, prompt: Text("例如 qwen3:8b"))
+                HStack {
+                    Button(store.isRestarting ? "正在重连…" : "保存并重新连接") {
+                        Task { saved = await store.saveSettings(draft) }
                     }
-                    if let error = store.settingsError { Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled) }
-                } header: { Text("本地模型") } footer: {
-                    Text("连接 Ollama 或 OpenAI 兼容服务。地址仅允许 localhost、127.0.0.1 和 ::1；填写本机已安装的模型名称。")
+                    .disabled(store.isRestarting)
+                    if saved && store.settingsError == nil { Text("配置已保存").font(.caption).foregroundStyle(.secondary) }
                 }
-                Section {
-                    LabeledContent("主动建议", value: store.isConnected ? (store.paused ? "已暂停" : "已开启") : "Agent 未连接")
-                    Button(store.paused ? "恢复主动建议" : "暂停主动建议") { store.togglePause() }
-                        .disabled(!store.isConnected || store.isChangingPause)
-                    Toggle("新建议显示系统通知", isOn: Binding(get: { store.notificationsEnabled }, set: { value in
-                        Task { await store.setNotificationsEnabled(value) }
-                    }))
-                    .disabled(!store.notificationSupported)
-                    if !store.notificationSupported { Text("系统通知需要从 Another You.app 启动。").font(.caption).foregroundStyle(.secondary) }
-                    if let message = store.notificationMessage { Text(message).font(.caption).foregroundStyle(.secondary) }
-                } header: { Text("介入方式") } footer: {
-                    Text("当前仅使用时间、应用启动和 Mac 闲置信号。生成草稿前由你决定。")
-                }
-                Section("运行状态") {
-                    LabeledContent("Agent", value: store.connection.label)
-                    Text(store.modelMessage).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
-                }
+                if let error = store.settingsError { Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled) }
+            } header: { Text("本地模型") }
+            Section {
+                LabeledContent("主动建议", value: store.isConnected ? (store.paused ? "已暂停" : "已开启") : "Agent 未连接")
+                Button(store.paused ? "恢复主动建议" : "暂停主动建议") { store.togglePause() }
+                    .disabled(!store.isConnected || store.isChangingPause)
+                Toggle("新建议显示系统通知", isOn: Binding(get: { store.notificationsEnabled }, set: { value in
+                    Task { await store.setNotificationsEnabled(value) }
+                }))
+                .disabled(!store.notificationSupported)
+                if !store.notificationSupported { Text("系统通知需要从 Another You.app 启动。").font(.caption).foregroundStyle(.secondary) }
+                if let message = store.notificationMessage { Text(message).font(.caption).foregroundStyle(.secondary) }
+            } header: { Text("介入方式") }
+            Section("运行状态") {
+                LabeledContent("Agent", value: store.connection.label)
             }
-            .formStyle(.grouped)
         }
-        .frame(width: 540, height: 620)
+        .formStyle(.grouped)
+        .frame(minWidth: 500, minHeight: 400)
         .onChange(of: draft) { _, _ in saved = false }
     }
 }
