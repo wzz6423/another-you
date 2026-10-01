@@ -1,6 +1,6 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir, platform } from "node:os";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 export const CONFIG_VERSION = 1;
 
@@ -59,11 +59,12 @@ export class ConfigError extends Error {
 const DEFAULT_MODEL: ModelConfig = {
   provider: "local",
   model: "local-default",
+  endpoint: "http://127.0.0.1:11434/v1",
   temperature: 0.2,
 };
 
 const DEFAULT_TOOLS: ToolConfig = {
-  filesystem: true,
+  filesystem: false,
   shell: false,
   network: false,
   calendar: false,

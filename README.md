@@ -1,45 +1,84 @@
 # Another You
 
-Another You 是一个只面向 macOS 的私有化个人 AI 助手原型。它以“主动提醒、可审阅、可撤回”为默认交互：助手在合适的时间提出少量建议，用户确认后才执行外部动作。
+一个只面向 macOS 的私有化个人 AI 助手。在合适的时间提出下一步，让你决定生成草稿、稍后提醒或忽略。
 
-## 当前形态
+SwiftUI 负责原生窗口、菜单栏和设置，Node sidecar 负责主动调度、状态持久化与 Pi Agent SDK。本版以本机模型为默认入口，属于可运行的开发预览。
 
-- `macos/AnotherYou`：SwiftUI 原生界面和本地 mock，展示主动卡片、时间线、执行/稍后/忽略动作。
-- `agent-core`：主动触发、冷却去重、隐私配置和 Pi 运行时接入边界。
-- `.github/workflows/ci.yml`：macOS Swift 构建/测试与 Agent 核心测试。
+## 本地运行
 
-项目仍处于 MVP 阶段，当前不读取屏幕、不连接邮件/日历，也不会在后台发送消息或执行不可逆动作。
-
-## 快速开始
+需要 macOS 14+、Swift 6 工具链、Node 22.19+，以及提供 OpenAI 兼容 API 的本机模型服务。
 
 ```bash
-git clone https://github.com/wzz6423/another-you.git
-cd another-you
-
-# SwiftUI 界面
-swift build --package-path macos/AnotherYou
-swift test --package-path macos/AnotherYou
-
-# Agent 核心
-./agent-core/scripts/bootstrap-pi.sh
-cd agent-core
-npm ci
-npm test
+(cd agent-core && npm ci)
+ANOTHER_YOU_AGENT_ROOT="$PWD/agent-core" \
+  swift run --package-path macos/AnotherYou AnotherYou
 ```
 
-首次运行 Pi 接入前，先阅读 `agent-core/README.md` 和 `agent-core/config.example.json`，所有密钥都应放在本机 Keychain 或环境变量中，不要写入仓库。
+首次打开后，在设置里填写模型地址和已安装的模型名称。以 Ollama 为例，地址是 `http://127.0.0.1:11434/v1`，模型名须与 `ollama list` 一致。应用不会自动下载模型，服务不可用时会显示错误。
 
-## 私有化原则
+```bash
+# 示例：需要先自行安装 Ollama，然后选择一个适合本机的模型
+ollama pull qwen3:4b
+```
 
-1. 数据默认留在本机，外部连接器按项启用并可撤销。
-2. 主动建议必须有来源、原因、风险级别和冷却窗口。
-3. 发送邮件、修改日历、执行命令等外部动作始终需要显式确认。
-4. Pi 上游通过脚本按锁定 commit 拉取，定制逻辑放在本项目扩展层，便于升级和回滚。
+开发环境可通过 `ANOTHER_YOU_NODE` 指定 Node 可执行文件。应用数据保存于 `~/Library/Application Support/AnotherYou/`；配置为 `config.json`，建议及活动记录为 `state.json`。
 
-## 上游说明
+## 当前能力
 
-底层 Agent 使用 [earendil-works/pi](https://github.com/earendil-works/pi) 的可扩展运行时。当前锁定版本和许可证见 `agent-core/upstream.json`；Pi 项目采用 MIT 许可证。仓库不把上游源码直接复制进主仓库，bootstrap 脚本会按锁定 commit 拉取到被忽略的本地目录。
+- 从启动事件、每日时间和实际闲置时长产生主动建议，带来源说明、冷却与去重。
+- 生成草稿、稍后提醒、忽略和暂停主动提醒；建议状态保存在本机。
+- 通过真实 stdin/stdout JSONL 协议连接 Swift 与 Node，模型请求由官方 Pi SDK 执行。
+- 默认只连接本机回环地址；远程私有模型需在配置中明确授权主机和网络访问。
+- 官网预览展示建议交互和本地启动步骤，不包含追踪脚本或远程提交表单。
 
-## 开发状态
+尚未接入 Calendar、Mail、Notes 或屏幕内容。当前模型没有文件、Shell、发送消息等工具；“生成草稿”不会对外执行动作。规则产生建议与模型推理是两条明确区分的路径，模型缺失不会伪装为成功。
 
-这是一个可运行的本地骨架，后续优先级是：菜单栏入口与系统通知、事件采集权限、Keychain 密钥存储、连接器审批、长期记忆编辑器和真实 Pi session 流式输出。
+## 开发应用与官网
+
+```bash
+# 生成本机开发 .app；依赖本机 Node，不可直接分发
+./scripts/build-app.sh
+open "dist/macos/Another You.app"
+
+# 使用 nodejs.org 官方独立二进制内置 Node
+BUNDLE_NODE=1 ANOTHER_YOU_NODE=/path/to/official-node/bin/node \
+  OUTPUT_DIRECTORY=/path/to/new-output ./scripts/build-app.sh
+
+# 官网本地预览
+python3 -m http.server 4173 --bind 127.0.0.1 --directory website
+```
+
+打包脚本只生成当前架构的 ad-hoc 签名开发应用，并拒绝覆盖已有输出。CI 验证通过后保留开发 ZIP 产物 7 天。尚未做 Developer ID 签名、公证、正式下载或自动更新。Gitee 的 GitHub 镜像由仓库所有者配置。
+
+## 项目结构
+
+| 路径 | 职责 |
+| --- | --- |
+| `macos/AnotherYou` | SwiftUI、菜单栏、设置、sidecar 客户端 |
+| `agent-core` | 调度、持久化、模型隐私策略、Pi SDK |
+| `website` | 官网静态页面及建议交互演示 |
+| `scripts/build-app.sh` | macOS 开发应用打包 |
+| `.github/workflows/ci.yml` | Swift、Agent、官网与打包检查 |
+
+## 验证
+
+```bash
+(cd agent-core && npm ci)
+npm run check --prefix agent-core
+npm test --prefix agent-core
+swift test --package-path macos/AnotherYou
+bash -n scripts/build-app.sh
+```
+
+测试中的模型服务使用本地 HTTP fixture，不代表真实模型的回答质量。CI 参考 Zisla 的最小权限、并发取消、分模块验证和产物清理，并检查 `.app` 结构、签名及内置 sidecar 的运行。
+
+## 上游与定制
+
+使用 MIT 许可的 [Pi](https://github.com/earendil-works/pi)。最新源码提交和生产 SDK 版本分别锁定在 [`agent-core/pi-source.lock.json`](agent-core/pi-source.lock.json)；生产依赖由 `package-lock.json` 固定。定制保留在本项目调度和适配层，不把第三方源码复制进主仓库。
+
+```bash
+# 可选：拉取锁定的上游源码以供研究和定制
+./agent-core/scripts/bootstrap-pi.sh
+```
+
+架构和隐私边界见 [`docs/architecture.md`](docs/architecture.md)，来源与采用方式见 [`docs/sources.md`](docs/sources.md)。

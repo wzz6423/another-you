@@ -5,6 +5,9 @@ export type AgentEventKind =
   | "scheduler.signal"
   | "scheduler.status"
   | "agent.status"
+  | "agent.request"
+  | "agent.response"
+  | "proposal.updated"
   | "agent.error";
 
 export type AgentEventSource = "scheduler" | "agent" | "system";

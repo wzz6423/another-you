@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { SchedulerConfig } from "./config.ts";
 import { EventBus, type AgentEvent } from "./events.ts";
 
@@ -24,9 +25,15 @@ export type TriggerRule =
 export interface SchedulerOptions {
   defaults?: Pick<SchedulerConfig, "defaultCooldownMs" | "defaultDedupeWindowMs" | "pollIntervalMs">;
   now?: () => Date;
+  shouldFire?: (ruleId: string) => boolean;
 }
 
-export interface ProactiveSuggestionPayload {
+export interface SchedulerState {
+  lastFiredAt: Record<string, number>;
+  lastDedupeAt: Record<string, number>;
+}
+
+export interface ProactiveSuggestionPayload extends Record<string, unknown> {
   ruleId: string;
   title: string;
   message: string;
@@ -35,7 +42,7 @@ export interface ProactiveSuggestionPayload {
   signal: Record<string, unknown>;
 }
 
-const DEFAULTS: Required<SchedulerOptions["defaults"]> = {
+const DEFAULTS: NonNullable<SchedulerOptions["defaults"]> = {
   defaultCooldownMs: 30 * 60_000,
   defaultDedupeWindowMs: 5 * 60_000,
   pollIntervalMs: 30_000,
@@ -95,7 +102,8 @@ function serializedSignal(signal: SchedulerSignal, at: Date): Record<string, unk
 export class ProactiveScheduler {
   readonly events: EventBus;
   private readonly clock: () => Date;
-  private readonly defaults: Required<SchedulerOptions["defaults"]>;
+  private readonly shouldFire: (ruleId: string) => boolean;
+  private readonly defaults: NonNullable<SchedulerOptions["defaults"]>;
   private readonly rules = new Map<string, TriggerRule>();
   private readonly lastFiredAt = new Map<string, number>();
   private readonly lastDedupeAt = new Map<string, number>();
@@ -104,6 +112,7 @@ export class ProactiveScheduler {
   constructor(rules: TriggerRule[] = [], events = new EventBus(), options: SchedulerOptions = {}) {
     this.events = events;
     this.clock = options.now ?? (() => new Date());
+    this.shouldFire = options.shouldFire ?? (() => true);
     this.defaults = { ...DEFAULTS, ...(options.defaults ?? {}) };
     for (const rule of rules) this.addRule(rule);
   }
@@ -122,11 +131,24 @@ export class ProactiveScheduler {
     return [...this.rules.values()].map((rule) => ({ ...rule }));
   }
 
+  snapshot(): SchedulerState {
+    return { lastFiredAt: Object.fromEntries(this.lastFiredAt), lastDedupeAt: Object.fromEntries(this.lastDedupeAt) };
+  }
+
+  restore(state: SchedulerState): void {
+    for (const [key, timestamp] of Object.entries(state.lastFiredAt ?? {})) {
+      if (Number.isFinite(timestamp)) this.lastFiredAt.set(key, timestamp);
+    }
+    for (const [key, timestamp] of Object.entries(state.lastDedupeAt ?? {})) {
+      if (Number.isFinite(timestamp)) this.lastDedupeAt.set(key, timestamp);
+    }
+  }
+
   ingest(signal: SchedulerSignal, now = this.clock()): AgentEvent<ProactiveSuggestionPayload>[] {
     const receivedAt = parseDate(signal.at, now);
     const events: AgentEvent<ProactiveSuggestionPayload>[] = [];
     for (const rule of this.rules.values()) {
-      if (!rule.enabled || !this.matches(rule, signal, receivedAt)) continue;
+      if (!rule.enabled || !this.shouldFire(rule.id) || !this.matches(rule, signal, receivedAt)) continue;
       const event = this.fire(rule, signal, receivedAt);
       if (event) events.push(event);
     }
@@ -176,11 +198,14 @@ export class ProactiveScheduler {
 
   private fire(rule: TriggerRule, signal: SchedulerSignal, at: Date): AgentEvent<ProactiveSuggestionPayload> | undefined {
     const timestamp = at.getTime();
+    for (const [key, lastAt] of this.lastDedupeAt) {
+      if (timestamp - lastAt > 7 * 24 * 60 * 60_000) this.lastDedupeAt.delete(key);
+    }
     const lastFire = this.lastFiredAt.get(rule.id);
     const cooldownMs = rule.cooldownMs ?? this.defaults.defaultCooldownMs;
     if (lastFire !== undefined && timestamp - lastFire < cooldownMs) return undefined;
 
-    const dedupeKey = signal.dedupeKey ?? this.defaultDedupeKey(rule, signal, at);
+    const dedupeKey = createHash("sha256").update(signal.dedupeKey ?? this.defaultDedupeKey(rule, signal, at)).digest("hex");
     const lastDedupe = this.lastDedupeAt.get(dedupeKey);
     const dedupeWindowMs = rule.dedupeWindowMs ?? this.defaults.defaultDedupeWindowMs;
     if (lastDedupe !== undefined && timestamp - lastDedupe < dedupeWindowMs) return undefined;

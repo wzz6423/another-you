@@ -2,7 +2,9 @@
   "repository": "https://github.com/earendil-works/pi.git",
   "legacyRepository": "https://github.com/badlogic/pi-mono.git",
   "ref": "main",
-  "commit": "8ce69e9d2b171d173fe4b6b2b6256f1f4411e69d",
+  "commit": "e792ba131ed0495f3ff58a0eb13f20540e344d5c",
   "license": "MIT",
+  "sdkVersion": "0.99.2",
+  "sdkCommit": "005af57d88ee23b33778f343a9595b32e67ff788",
   "resolvedAt": "2026-10-01"
 }

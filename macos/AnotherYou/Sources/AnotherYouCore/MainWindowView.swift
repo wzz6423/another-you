@@ -2,138 +2,80 @@ import AppKit
 import SwiftUI
 
 private enum SidebarItem: String, CaseIterable, Identifiable {
-    case today
-    case history
-
+    case today, history
     var id: String { rawValue }
-
-    var title: String {
-        switch self {
-        case .today: "今天"
-        case .history: "活动记录"
-        }
-    }
-
-    var icon: String {
-        switch self {
-        case .today: "sun.max.fill"
-        case .history: "clock.arrow.circlepath"
-        }
-    }
-}
-
-private struct TimelineEntry: Identifiable {
-    let id: String
-    let title: String
-    let detail: String
-    let icon: String
-    let color: Color
+    var title: String { self == .today ? "今天" : "活动记录" }
+    var icon: String { self == .today ? "sun.max" : "clock.arrow.circlepath" }
 }
 
 @MainActor
 public struct MainWindowView: View {
-    @StateObject private var store: AssistantStore
+    @ObservedObject private var store: AssistantStore
     @State private var selectedItem: SidebarItem = .today
     @State private var showingSettings = false
 
-    public init(store: AssistantStore = AssistantStore()) {
-        _store = StateObject(wrappedValue: store)
-    }
+    public init(store: AssistantStore) { self.store = store }
 
     public var body: some View {
         NavigationSplitView {
-            SidebarView(selection: $selectedItem) {
-                showingSettings = true
-            }
+            SidebarView(store: store, selection: $selectedItem) { showingSettings = true }
         } detail: {
             switch selectedItem {
-            case .today:
-                DashboardView(store: store)
-            case .history:
-                HistoryView(store: store)
+            case .today: DashboardView(store: store) { showingSettings = true }
+            case .history: HistoryView(store: store)
             }
         }
         .navigationSplitViewStyle(.balanced)
-        .sheet(isPresented: $showingSettings) {
-            SettingsView()
-        }
+        .frame(minWidth: 780, minHeight: 580)
+        .sheet(isPresented: $showingSettings) { SettingsView(store: store) }
+        .task { store.connect() }
     }
 }
 
 @MainActor
 private struct SidebarView: View {
+    @ObservedObject var store: AssistantStore
     @Binding var selection: SidebarItem
     let onSettings: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 11) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(Color.anotherAccentGradient)
-                    Image(systemName: "sparkles")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(.white)
-                }
-                .frame(width: 34, height: 34)
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Another You")
-                        .font(.system(size: 15, weight: .semibold, design: .rounded))
-                    Text("主动式个人助手")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
+            HStack(spacing: 10) {
+                Image(systemName: "circle.lefthalf.filled")
+                    .font(.system(size: 28, weight: .light))
+                    .foregroundStyle(Color.anotherAccent)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Another You").font(.system(size: 15, weight: .semibold, design: .rounded))
+                    Text("把主动，留给恰好的时刻").font(.system(size: 10)).foregroundStyle(.secondary)
                 }
             }
-            .padding(.horizontal, 18)
-            .padding(.top, 22)
-            .padding(.bottom, 28)
+            .padding(.horizontal, 18).padding(.top, 26).padding(.bottom, 30)
 
-            VStack(alignment: .leading, spacing: 5) {
+            VStack(spacing: 5) {
                 ForEach(SidebarItem.allCases) { item in
-                    Button {
-                        selection = item
-                    } label: {
+                    Button { selection = item } label: {
                         Label(item.title, systemImage: item.icon)
                             .font(.system(size: 13, weight: .medium))
                             .foregroundStyle(selection == item ? Color.anotherInk : .secondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal, 13)
-                            .padding(.vertical, 9)
-                            .background {
-                                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                    .fill(selection == item ? Color.anotherAccent.opacity(0.12) : .clear)
-                            }
+                            .padding(.horizontal, 13).padding(.vertical, 10)
+                            .background(selection == item ? Color.anotherAccent.opacity(0.10) : .clear, in: RoundedRectangle(cornerRadius: 10))
                     }
                     .buttonStyle(.plain)
                 }
             }
-            .padding(.horizontal, 11)
-
+            .padding(.horizontal, 12)
             Spacer()
-
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(spacing: 8) {
-                    Circle()
-                        .fill(Color.anotherGreen)
-                        .frame(width: 7, height: 7)
-                    Text("本地 Agent 在线")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
-                }
-
-                Button(action: onSettings) {
-                    Label("设置", systemImage: "slider.horizontal.3")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .buttonStyle(.plain)
+            VStack(alignment: .leading, spacing: 15) {
+                Label(store.paused && store.isConnected ? "主动建议已暂停" : store.connection.label,
+                      systemImage: store.isConnected ? "checkmark.circle" : "circle.dotted")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                Button(action: onSettings) { Label("设置", systemImage: "slider.horizontal.3") }
+                    .buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(.secondary)
             }
-            .padding(.horizontal, 20)
-            .padding(.bottom, 22)
+            .padding(20)
         }
-        .frame(minWidth: 210, idealWidth: 228, maxWidth: 250)
+        .frame(minWidth: 205, idealWidth: 228, maxWidth: 250)
         .background(Color.anotherSidebar)
     }
 }
@@ -141,93 +83,53 @@ private struct SidebarView: View {
 @MainActor
 private struct DashboardView: View {
     @ObservedObject var store: AssistantStore
-
-    private var timelineEntries: [TimelineEntry] {
-        var entries = [
-            TimelineEntry(
-                id: "scan",
-                title: "完成今日环境扫描",
-                detail: "刚刚 · 日程、专注和备忘录已同步到本地",
-                icon: "checkmark.shield.fill",
-                color: .anotherGreen
-            )
-        ]
-
-        entries.append(contentsOf: store.cards.filter { $0.state != .dismissed }.prefix(3).map { card in
-            TimelineEntry(
-                id: card.id.uuidString,
-                title: card.title,
-                detail: card.state == .pending ? "等待你的决定" : card.state.label,
-                icon: card.kind.icon,
-                color: card.kind.tint
-            )
-        })
-        return entries
-    }
+    let onSettings: () -> Void
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
+            VStack(alignment: .leading, spacing: 26) {
                 HeroHeader(store: store)
-
-                HStack(spacing: 12) {
-                    MetricTile(
-                        title: "今日建议",
-                        value: "\(store.cards.count)",
-                        caption: "已为你筛选",
-                        icon: "sparkles",
-                        color: .anotherAccent
-                    )
-                    MetricTile(
-                        title: "已完成",
-                        value: "\(store.completedCount)",
-                        caption: store.completedCount == 0 ? "从第一步开始" : "节奏保持得很好",
-                        icon: "checkmark",
-                        color: .anotherGreen
-                    )
-                    MetricTile(
-                        title: "下一次介入",
-                        value: nextDueText,
-                        caption: "只在需要时出现",
-                        icon: "bell.badge",
-                        color: .anotherOrange
-                    )
+                if !store.modelConfigured || !store.isConnected {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text(store.isConnected ? "连接你的本地模型" : store.connection.label)
+                            .font(.system(size: 14, weight: .semibold))
+                        Text(store.isConnected ? "主动建议由本地规则触发。连接 Ollama 等兼容服务后，可以生成草稿、一起梳理想法。" : store.statusMessage)
+                            .font(.system(size: 12)).foregroundStyle(.secondary).textSelection(.enabled)
+                        HStack {
+                            Button("模型设置", action: onSettings)
+                            if !store.isConnected { Button("重新连接") { store.refresh() }.disabled(store.connection == .starting || store.isRestarting) }
+                        }
+                    }
+                    .padding(18).frame(maxWidth: .infinity, alignment: .leading)
+                    .background(.background, in: RoundedRectangle(cornerRadius: 16))
                 }
-
+                HStack(spacing: 12) {
+                    MetricTile(title: "等待决定", value: "\(store.pendingCount)", caption: "按你的节奏处理", icon: "tray")
+                    MetricTile(title: "生成的草稿", value: "\(store.completedCount)", caption: "由你决定下一步", icon: "doc.text")
+                    MetricTile(title: "主动建议", value: store.isConnected ? (store.paused ? "已暂停" : "已开启") : "未连接", caption: "仅使用时间和闲置信号", icon: "waveform.path")
+                }
                 VStack(alignment: .leading, spacing: 14) {
-                    SectionHeading(
-                        title: "今天替你留意",
-                        subtitle: "我会先理解上下文，再把建议交给你决定"
-                    )
-
-                    LazyVStack(spacing: 12) {
-                        ForEach(store.cards) { card in
-                            ProactiveCardView(card: card) { action in
-                                store.apply(action, to: card)
+                    SectionHeading(title: "值得你看一眼", subtitle: "一条建议，一个由你决定的下一步")
+                    if store.activeCards.isEmpty {
+                        Text(store.connection == .starting ? "正在读取本地建议…" : "暂时没有建议。合适的时间，助手会出现在这里。")
+                            .font(.system(size: 13)).foregroundStyle(.secondary)
+                            .padding(24).frame(maxWidth: .infinity, alignment: .leading)
+                            .background(.background, in: RoundedRectangle(cornerRadius: 18))
+                    } else {
+                        LazyVStack(spacing: 12) {
+                            ForEach(store.activeCards) { card in
+                                ProactiveCardView(card: card, busy: store.pendingActions.contains(card.id), connected: store.isConnected, modelConfigured: store.modelConfigured) { store.apply($0, to: card) }
                             }
                         }
                     }
                 }
-
-                VStack(alignment: .leading, spacing: 14) {
-                    SectionHeading(
-                        title: "活动时间线",
-                        subtitle: "你的助手最近做了什么"
-                    )
-                    ActivityTimeline(entries: timelineEntries)
-                }
+                PromptView(store: store)
             }
-            .frame(maxWidth: 920, alignment: .leading)
-            .padding(.horizontal, 34)
-            .padding(.vertical, 30)
+            .frame(maxWidth: 890, alignment: .leading)
+            .padding(.horizontal, 30).padding(.vertical, 30)
+            .frame(maxWidth: .infinity)
         }
         .background(Color.anotherCanvas)
-    }
-
-    private var nextDueText: String {
-        guard let nextDate = store.nextDueDate else { return "—" }
-        let minutes = max(1, Int(nextDate.timeIntervalSinceNow / 60))
-        return minutes < 60 ? "\(minutes) 分钟" : "\(minutes / 60) 小时"
     }
 }
 
@@ -236,126 +138,64 @@ private struct HeroHeader: View {
     @ObservedObject var store: AssistantStore
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
+        VStack(alignment: .leading, spacing: 22) {
             HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(greeting)
-                        .font(.system(size: 30, weight: .bold, design: .rounded))
-                        .foregroundStyle(Color.anotherInk)
-                    Text("今天的节奏，我先替你照看着。")
-                        .font(.system(size: 14))
-                        .foregroundStyle(Color.anotherInk.opacity(0.68))
+                VStack(alignment: .leading, spacing: 9) {
+                    Text(Date.now.formatted(.dateTime.month(.wide).day().weekday(.wide)))
+                        .font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
+                    Text("留一点空间，专注眼前。")
+                        .font(.system(size: 27, weight: .semibold, design: .rounded)).foregroundStyle(Color.anotherInk)
+                    Text("在恰好的时候，帮你往前一步。")
+                        .font(.system(size: 13)).foregroundStyle(.secondary)
                 }
-
+                Spacer(minLength: 10)
+                Button { store.togglePause() } label: {
+                    Label(store.paused ? "恢复" : "暂停", systemImage: store.paused ? "play" : "pause")
+                }
+                .buttonStyle(.bordered).controlSize(.small)
+                .disabled(!store.isConnected || store.isChangingPause)
+            }
+            HStack(alignment: .top, spacing: 8) {
+                Circle().fill(store.isConnected ? Color.anotherGreen : .secondary).frame(width: 6, height: 6).padding(.top, 5)
+                Text(store.statusMessage).font(.system(size: 12)).foregroundStyle(.secondary).textSelection(.enabled)
                 Spacer()
-
-                Button {
-                    store.refresh()
-                } label: {
-                    Label("刷新建议", systemImage: "arrow.clockwise")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(Color.anotherInk)
-                        .padding(.horizontal, 13)
-                        .padding(.vertical, 9)
-                        .background(.white.opacity(0.72), in: Capsule())
-                }
-                .buttonStyle(.plain)
+                Button { store.refresh() } label: { Image(systemName: "arrow.clockwise") }
+                    .buttonStyle(.plain).help("更新 Agent 状态").disabled(store.connection == .starting || store.isRestarting)
             }
-
-            HStack(spacing: 9) {
-                Circle()
-                    .fill(Color.anotherGreen)
-                    .frame(width: 8, height: 8)
-                Text(store.statusMessage)
-                    .font(.system(size: 12, weight: .medium))
-                Text("·")
-                    .foregroundStyle(.secondary)
-                Text("上次更新 \(store.lastUpdated.formatted(date: .omitted, time: .shortened))")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-            }
-            .foregroundStyle(Color.anotherInk.opacity(0.72))
         }
-        .padding(26)
-        .background {
-            RoundedRectangle(cornerRadius: 26, style: .continuous)
-                .fill(Color.anotherHeroGradient)
-        }
-        .overlay(alignment: .topTrailing) {
-            Circle()
-                .fill(.white.opacity(0.22))
-                .frame(width: 130, height: 130)
-                .blur(radius: 2)
-                .offset(x: 35, y: -42)
-                .allowsHitTesting(false)
-        }
-        .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
-    }
-
-    private var greeting: String {
-        let hour = Calendar.current.component(.hour, from: Date())
-        switch hour {
-        case 5..<12: return "早上好，今天想先做什么？"
-        case 12..<18: return "下午好，给自己留一点空间。"
-        default: return "晚上好，今天辛苦了。"
-        }
+        .padding(25)
+        .background(Color.anotherHero, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
     }
 }
 
-@MainActor
 private struct MetricTile: View {
     let title: String
     let value: String
     let caption: String
     let icon: String
-    let color: Color
 
     var body: some View {
         VStack(alignment: .leading, spacing: 13) {
             HStack {
-                Image(systemName: icon)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(color)
-                    .frame(width: 26, height: 26)
-                    .background(color.opacity(0.12), in: Circle())
+                Text(title).font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
                 Spacer()
+                Image(systemName: icon).font(.system(size: 12)).foregroundStyle(Color.anotherAccent)
             }
-            Text(value)
-                .font(.system(size: 24, weight: .bold, design: .rounded))
-                .foregroundStyle(Color.anotherInk)
-                .lineLimit(1)
-                .minimumScaleFactor(0.7)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(title)
-                    .font(.system(size: 12, weight: .semibold))
-                Text(caption)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-            }
+            Text(value).font(.system(size: 22, weight: .semibold, design: .rounded)).foregroundStyle(Color.anotherInk)
+            Text(caption).font(.system(size: 10)).foregroundStyle(.secondary)
         }
-        .frame(maxWidth: .infinity, minHeight: 124, alignment: .leading)
-        .padding(16)
-        .background(.white.opacity(0.76), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(Color.black.opacity(0.035), lineWidth: 1)
-        }
+        .frame(maxWidth: .infinity, alignment: .leading).padding(16)
+        .background(.background, in: RoundedRectangle(cornerRadius: 16))
     }
 }
 
-@MainActor
 private struct SectionHeading: View {
     let title: String
     let subtitle: String
-
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title)
-                .font(.system(size: 19, weight: .bold, design: .rounded))
-                .foregroundStyle(Color.anotherInk)
-            Text(subtitle)
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 5) {
+            Text(title).font(.system(size: 17, weight: .semibold, design: .rounded)).foregroundStyle(Color.anotherInk)
+            Text(subtitle).font(.system(size: 12)).foregroundStyle(.secondary)
         }
     }
 }
@@ -363,166 +203,97 @@ private struct SectionHeading: View {
 @MainActor
 private struct ProactiveCardView: View {
     let card: ProactiveCard
+    let busy: Bool
+    let connected: Bool
+    let modelConfigured: Bool
     let onAction: (CardAction) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 17) {
-            HStack(alignment: .top, spacing: 13) {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .top, spacing: 12) {
                 Image(systemName: card.kind.icon)
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(card.kind.tint)
+                    .font(.system(size: 15)).foregroundStyle(Color.anotherAccent)
                     .frame(width: 34, height: 34)
-                    .background(card.kind.tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
-
+                    .background(Color.anotherAccent.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
                 VStack(alignment: .leading, spacing: 6) {
-                    HStack(spacing: 8) {
-                        Text(card.kind.label)
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(card.kind.tint)
-                        Text("·")
-                            .foregroundStyle(.tertiary)
-                        Text(card.priority.label)
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(.secondary)
+                    Text(card.title).font(.system(size: 16, weight: .semibold)).foregroundStyle(Color.anotherInk)
+                    Text(card.detail).font(.system(size: 12)).foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+                Text(busy ? "正在提交" : card.state.label)
+                    .font(.system(size: 10, weight: .medium)).foregroundStyle(card.state.tint)
+                    .padding(.horizontal, 8).padding(.vertical, 5)
+                    .background(card.state.tint.opacity(0.09), in: Capsule())
+            }
+            Text(card.rationale).font(.system(size: 11)).foregroundStyle(.secondary)
+            if let text = card.text, !text.isEmpty {
+                Text(text).font(.system(size: 13)).lineSpacing(4).textSelection(.enabled)
+                    .padding(14).frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.anotherCanvas, in: RoundedRectangle(cornerRadius: 12))
+                if card.state == .completed {
+                    Button("复制草稿", systemImage: "doc.on.doc") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(text, forType: .string)
                     }
-                    Text(card.title)
-                        .font(.system(size: 16, weight: .semibold, design: .rounded))
-                        .foregroundStyle(Color.anotherInk)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Text(card.detail)
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                    .controlSize(.small)
                 }
-
-                Spacer(minLength: 8)
-                StateBadge(state: card.state)
             }
-
-            VStack(alignment: .leading, spacing: 7) {
-                Label(card.suggestion, systemImage: "wand.and.stars")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(Color.anotherInk.opacity(0.82))
-                Text(card.rationale)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-            }
-            .padding(12)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.anotherCanvas, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-
-            if card.state == .pending {
-                HStack(spacing: 8) {
-                    ActionButton(action: .execute, prominent: true, onAction: onAction)
-                    ActionButton(action: .later, onAction: onAction)
-                    ActionButton(action: .ignore, onAction: onAction)
+            if [.pending, .failed, .snoozed].contains(card.state) {
+                HStack(spacing: 9) {
+                    Button(CardAction.execute.label, systemImage: CardAction.execute.icon) { onAction(.execute) }
+                        .buttonStyle(.borderedProminent).tint(Color.anotherInk).disabled(!modelConfigured)
+                    Button(CardAction.later.label) { onAction(.later) }
+                    Button(CardAction.ignore.label) { onAction(.ignore) }.buttonStyle(.borderless).foregroundStyle(.secondary)
                     Spacer()
-                    Label(card.dueDate.formatted(date: .omitted, time: .shortened), systemImage: "clock")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.tertiary)
                 }
-            } else {
-                Text(stateMessage)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(card.state.tint)
+                .controlSize(.small).disabled(busy || !connected)
+                if !modelConfigured { Text("连接本地模型后可以生成草稿。").font(.system(size: 11)).foregroundStyle(.secondary) }
+            }
+            if let date = card.snoozedUntil, card.state == .snoozed {
+                Text("将在 \(date.formatted(date: .omitted, time: .shortened)) 再次提醒。")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
             }
         }
-        .padding(18)
-        .background(.white.opacity(0.82), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .stroke(card.state == .pending ? Color.black.opacity(0.045) : card.state.tint.opacity(0.28), lineWidth: 1)
-        }
-    }
-
-    private var stateMessage: String {
-        switch card.state {
-        case .scheduled: "已放入稍后提醒，我会在合适的时间再出现。"
-        case .done: "已完成，今天又向前走了一步。"
-        case .dismissed: "已忽略，之后可以在活动记录中查看。"
-        case .pending: ""
-        }
+        .padding(19).frame(maxWidth: .infinity, alignment: .leading)
+        .background(.background, in: RoundedRectangle(cornerRadius: 18))
     }
 }
 
 @MainActor
-private struct ActionButton: View {
-    let action: CardAction
-    var prominent = false
-    let onAction: (CardAction) -> Void
+private struct PromptView: View {
+    @ObservedObject var store: AssistantStore
+    @State private var prompt = ""
 
     var body: some View {
-        Button {
-            onAction(action)
-        } label: {
-            Label(action.label, systemImage: action.icon)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(prominent ? .white : Color.anotherInk.opacity(0.75))
-                .padding(.horizontal, 11)
-                .padding(.vertical, 8)
-                .background {
-                    if prominent {
-                        RoundedRectangle(cornerRadius: 9, style: .continuous)
-                            .fill(Color.anotherInk)
+        VStack(alignment: .leading, spacing: 14) {
+            SectionHeading(title: "也可以一起想想", subtitle: store.modelMessage)
+            ForEach(store.conversation) { message in
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(message.prompt).font(.system(size: 13, weight: .medium)).textSelection(.enabled)
+                    if let response = message.response {
+                        Text(response).font(.system(size: 13)).lineSpacing(4).textSelection(.enabled)
+                    } else if let error = message.error {
+                        Text(error).font(.system(size: 12)).foregroundStyle(.red).textSelection(.enabled)
                     } else {
-                        RoundedRectangle(cornerRadius: 9, style: .continuous)
-                            .fill(Color.anotherCanvas)
+                        Text("正在等待本地模型回复…").font(.system(size: 12)).foregroundStyle(.secondary)
                     }
                 }
-        }
-        .buttonStyle(.plain)
-    }
-}
-
-@MainActor
-private struct StateBadge: View {
-    let state: CardState
-
-    var body: some View {
-        Text(state.label)
-            .font(.system(size: 10, weight: .semibold))
-            .foregroundStyle(state.tint)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5)
-            .background(state.tint.opacity(0.1), in: Capsule())
-    }
-}
-
-@MainActor
-private struct ActivityTimeline: View {
-    let entries: [TimelineEntry]
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            ForEach(Array(entries.enumerated()), id: \.element.id) { index, entry in
-                HStack(alignment: .top, spacing: 12) {
-                    VStack(spacing: 0) {
-                        Image(systemName: entry.icon)
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(entry.color)
-                            .frame(width: 26, height: 26)
-                            .background(entry.color.opacity(0.12), in: Circle())
-                        if index < entries.count - 1 {
-                            Rectangle()
-                                .fill(Color.black.opacity(0.08))
-                                .frame(width: 1, height: 30)
-                        }
-                    }
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(entry.title)
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(Color.anotherInk)
-                        Text(entry.detail)
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                    }
-                    .padding(.top, 3)
-                    Spacer()
-                }
+                .padding(16).frame(maxWidth: .infinity, alignment: .leading)
+                .background(.background, in: RoundedRectangle(cornerRadius: 14))
             }
+            VStack(alignment: .trailing, spacing: 10) {
+                TextField("写下想梳理的一件事…", text: $prompt, axis: .vertical)
+                    .lineLimit(3...8).textFieldStyle(.plain).font(.system(size: 13))
+                    .disabled(!store.isConnected || !store.modelConfigured)
+                Button(store.hasPendingPrompt ? "正在生成" : "发送", systemImage: "arrow.up") {
+                    if store.ask(prompt) { prompt = "" }
+                }
+                .buttonStyle(.borderedProminent).tint(Color.anotherInk).controlSize(.small)
+                .keyboardShortcut(.return, modifiers: .command)
+                .disabled(prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !store.isConnected || !store.modelConfigured || store.hasPendingPrompt)
+            }
+            .padding(16).background(.background, in: RoundedRectangle(cornerRadius: 16))
         }
-        .padding(18)
-        .background(.white.opacity(0.7), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 }
 
@@ -531,125 +302,124 @@ private struct HistoryView: View {
     @ObservedObject var store: AssistantStore
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            SectionHeading(title: "活动记录", subtitle: "每一次介入都由你掌控")
-            ForEach(store.cards.filter { $0.state != .pending }) { card in
-                HStack(spacing: 12) {
-                    Image(systemName: card.kind.icon)
-                        .foregroundStyle(card.kind.tint)
-                        .frame(width: 28, height: 28)
-                        .background(card.kind.tint.opacity(0.12), in: Circle())
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(card.title)
-                            .font(.system(size: 13, weight: .semibold))
-                        Text(card.state.label)
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer()
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                SectionHeading(title: "活动记录", subtitle: "每次建议、决定和生成，留有依据")
+                if store.activityHistory.isEmpty {
+                    Text("还没有活动记录。Agent 的真实事件会出现在这里。")
+                        .font(.system(size: 13)).foregroundStyle(.secondary).padding(.vertical, 20)
                 }
-                .padding(14)
-                .background(.white.opacity(0.8), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                LazyVStack(spacing: 10) {
+                    ForEach(store.activityHistory) { event in
+                        VStack(alignment: .leading, spacing: 7) {
+                            HStack {
+                                Text(title(for: event)).font(.system(size: 13, weight: .medium))
+                                Spacer()
+                                Text(event.date?.formatted(date: .abbreviated, time: .shortened) ?? "")
+                                    .font(.system(size: 10)).foregroundStyle(.secondary)
+                            }
+                            if let detail = event.payload["message"]?.string ?? event.payload["text"]?.string {
+                                Text(detail).font(.system(size: 12)).foregroundStyle(.secondary).textSelection(.enabled)
+                            }
+                        }
+                        .padding(16).frame(maxWidth: .infinity, alignment: .leading)
+                        .background(.background, in: RoundedRectangle(cornerRadius: 14))
+                    }
+                }
             }
-            if store.cards.allSatisfy({ $0.state == .pending }) {
-                Text("还没有活动记录，决定一条建议后它会出现在这里。")
-                    .font(.system(size: 13))
-                    .foregroundStyle(.secondary)
-                    .padding(.vertical, 12)
-            }
-            Spacer()
+            .frame(maxWidth: 890, alignment: .leading).padding(30).frame(maxWidth: .infinity)
         }
-        .frame(maxWidth: 720, alignment: .leading)
-        .padding(34)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Color.anotherCanvas)
     }
-}
 
-public struct SettingsView: View {
-    @Environment(\.dismiss) private var dismiss
-    @State private var proactiveEnabled = true
-    @State private var quietHoursEnabled = true
-    @State private var localOnly = true
-
-    public init() {}
-
-    public var body: some View {
-        Form {
-            Section {
-                Toggle("允许主动建议", isOn: $proactiveEnabled)
-                Toggle("遵守安静时段", isOn: $quietHoursEnabled)
-            } header: {
-                Text("主动性")
-            } footer: {
-                Text("助手会根据上下文选择少量真正有帮助的时机。")
-            }
-
-            Section {
-                Toggle("仅使用本地 Agent", isOn: $localOnly)
-                Label("数据留在这台 Mac 上", systemImage: "lock.shield.fill")
-                    .foregroundStyle(Color.anotherGreen)
-            } header: {
-                Text("隐私")
-            } footer: {
-                Text("当前版本使用本地 mock 数据，AgentClient 可替换为私有化实现。")
-            }
-
-            Section("关于") {
-                LabeledContent("版本", value: "0.1 本地预览")
-                LabeledContent("运行状态", value: "Agent 已就绪")
-            }
-        }
-        .formStyle(.grouped)
-        .frame(width: 470, height: 420)
-        .toolbar {
-            ToolbarItem(placement: .confirmationAction) {
-                Button("完成") {
-                    dismiss()
-                }
-            }
+    private func title(for event: AgentEvent) -> String {
+        switch event.kind {
+        case "proactive.suggestion": event.payload["title"]?.string ?? "新的主动建议"
+        case "proposal.updated": event.payload["state"]?.string.flatMap(CardState.init(rawValue:))?.label ?? "建议已更新"
+        case "agent.response": "模型回复已生成"
+        case "agent.error": "Agent 错误"
+        default: event.kind
         }
     }
 }
 
-private extension CardKind {
-    var tint: Color {
-        switch self {
-        case .focus: .anotherAccent
-        case .wellbeing: .anotherGreen
-        case .idea: .anotherPurple
-        case .reminder: .anotherOrange
+@MainActor
+public struct SettingsView: View {
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject private var store: AssistantStore
+    @State private var draft: AgentSettings
+    @State private var saved = false
+
+    public init(store: AssistantStore) {
+        self.store = store
+        _draft = State(initialValue: store.settings)
+    }
+
+    public var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("设置").font(.system(size: 18, weight: .semibold))
+                Spacer()
+                Button("完成") { dismiss() }.keyboardShortcut(.cancelAction)
+            }
+            .padding(22)
+            Form {
+                Section {
+                    TextField("服务地址", text: $draft.endpoint)
+                    TextField("模型名称", text: $draft.model, prompt: Text("例如 qwen3:8b"))
+                    HStack {
+                        Button(store.isRestarting ? "正在重连…" : "保存并重新连接") {
+                            Task { saved = await store.saveSettings(draft) }
+                        }
+                        .disabled(store.isRestarting)
+                        if saved && store.settingsError == nil { Text("配置已保存").font(.caption).foregroundStyle(.secondary) }
+                    }
+                    if let error = store.settingsError { Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled) }
+                } header: { Text("本地模型") } footer: {
+                    Text("连接 Ollama 或 OpenAI 兼容服务。地址仅允许 localhost、127.0.0.1 和 ::1；填写本机已安装的模型名称。")
+                }
+                Section {
+                    LabeledContent("主动建议", value: store.isConnected ? (store.paused ? "已暂停" : "已开启") : "Agent 未连接")
+                    Button(store.paused ? "恢复主动建议" : "暂停主动建议") { store.togglePause() }
+                        .disabled(!store.isConnected || store.isChangingPause)
+                    Toggle("新建议显示系统通知", isOn: Binding(get: { store.notificationsEnabled }, set: { value in
+                        Task { await store.setNotificationsEnabled(value) }
+                    }))
+                    .disabled(!store.notificationSupported)
+                    if !store.notificationSupported { Text("系统通知需要从 Another You.app 启动。").font(.caption).foregroundStyle(.secondary) }
+                    if let message = store.notificationMessage { Text(message).font(.caption).foregroundStyle(.secondary) }
+                } header: { Text("介入方式") } footer: {
+                    Text("当前仅使用时间、应用启动和 Mac 闲置信号。生成草稿前由你决定。")
+                }
+                Section("运行状态") {
+                    LabeledContent("Agent", value: store.connection.label)
+                    Text(store.modelMessage).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                }
+            }
+            .formStyle(.grouped)
         }
+        .frame(width: 540, height: 620)
+        .onChange(of: draft) { _, _ in saved = false }
     }
 }
 
 private extension CardState {
     var tint: Color {
         switch self {
-        case .pending: .anotherAccent
-        case .scheduled: .anotherOrange
-        case .done: .anotherGreen
-        case .dismissed: .secondary
+        case .pending, .running: .anotherAccent
+        case .snoozed: .orange
+        case .completed: .anotherGreen
+        case .ignored: .secondary
+        case .failed: .red
         }
     }
 }
 
 private extension Color {
-    static let anotherInk = Color(red: 0.10, green: 0.12, blue: 0.17)
-    static let anotherCanvas = Color(red: 0.965, green: 0.958, blue: 0.945)
-    static let anotherSidebar = Color(red: 0.985, green: 0.981, blue: 0.968)
-    static let anotherAccent = Color(red: 0.31, green: 0.29, blue: 0.85)
-    static let anotherGreen = Color(red: 0.14, green: 0.55, blue: 0.40)
-    static let anotherOrange = Color(red: 0.90, green: 0.46, blue: 0.19)
-    static let anotherPurple = Color(red: 0.65, green: 0.32, blue: 0.77)
-    static let anotherAccentGradient = LinearGradient(
-        colors: [Color(red: 0.39, green: 0.35, blue: 0.95), Color(red: 0.25, green: 0.57, blue: 0.85)],
-        startPoint: .topLeading,
-        endPoint: .bottomTrailing
-    )
-    static let anotherHeroGradient = LinearGradient(
-        colors: [Color(red: 0.88, green: 0.91, blue: 1.0), Color(red: 0.93, green: 0.89, blue: 0.99)],
-        startPoint: .topLeading,
-        endPoint: .bottomTrailing
-    )
+    static let anotherInk = Color.primary
+    static let anotherCanvas = Color(nsColor: .windowBackgroundColor)
+    static let anotherSidebar = Color(nsColor: .controlBackgroundColor)
+    static let anotherAccent = Color.indigo
+    static let anotherGreen = Color.green
+    static let anotherHero = Color.indigo.opacity(0.07)
 }

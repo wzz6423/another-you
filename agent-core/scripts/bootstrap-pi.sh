@@ -25,20 +25,25 @@ if [[ ! "$commit" =~ ^[0-9a-f]{40}$ ]]; then
   exit 1
 fi
 
+fetch_repository="$repository"
+if [[ "${PI_GIT_TRANSPORT:-https}" == "ssh" && "$repository" == https://github.com/* ]]; then
+  fetch_repository="git@github.com:${repository#https://github.com/}"
+fi
+
 case "$mode" in
   --print)
     cat "$lock_file"
     ;;
   --check)
-    remote_commit="$(git ls-remote "$repository" "refs/heads/$ref" | awk 'NR == 1 { print $1 }')"
+    remote_commit="$(git ls-remote "$fetch_repository" "refs/heads/$ref" | awk 'NR == 1 { print $1 }')"
     if [[ "$remote_commit" != "$commit" ]]; then
-      echo "锁定提交已不是 $ref 当前提交：锁定=$commit，远端=$remote_commit；需要显式执行 --refresh" >&2
+      echo "锁定提交已不是 ${ref} 当前提交：锁定=${commit}，远端=${remote_commit}；需要显式执行 --refresh" >&2
       exit 1
     fi
     echo "Pi 锁定有效：$repository@$commit"
     ;;
   --refresh)
-    latest_commit="$(git ls-remote "$repository" "refs/heads/$ref" | awk 'NR == 1 { print $1 }')"
+    latest_commit="$(git ls-remote "$fetch_repository" "refs/heads/$ref" | awk 'NR == 1 { print $1 }')"
     if [[ ! "$latest_commit" =~ ^[0-9a-f]{40}$ ]]; then
       echo "无法解析远端分支提交：$repository#$ref" >&2
       exit 1
@@ -60,20 +65,21 @@ NODE
     fi
     if [[ -d "$source_dir/.git" ]]; then
       current_repository="$(git -C "$source_dir" remote get-url origin)"
-      if [[ "$current_repository" != "$repository" && "$current_repository" != "https://github.com/badlogic/pi-mono.git" ]]; then
+      if [[ "$current_repository" != "$repository" && "$current_repository" != "$fetch_repository" && "$current_repository" != "https://github.com/badlogic/pi-mono.git" ]]; then
         echo "目标仓库来源不匹配：$current_repository" >&2
         exit 1
       fi
-      git -C "$source_dir" fetch --depth=1 origin "$commit"
+      git -C "$source_dir" fetch --depth=1 "$fetch_repository" "$commit"
     else
       mkdir -p "$(dirname "$source_dir")"
-      git clone --filter=blob:none --no-checkout "$repository" "$source_dir"
-      git -C "$source_dir" fetch --depth=1 origin "$commit"
+      git init "$source_dir"
+      git -C "$source_dir" remote add origin "$repository"
+      git -C "$source_dir" fetch --depth=1 "$fetch_repository" "$commit"
     fi
     git -C "$source_dir" checkout --detach "$commit"
     actual_commit="$(git -C "$source_dir" rev-parse HEAD)"
     if [[ "$actual_commit" != "$commit" ]]; then
-      echo "Pi 来源校验失败：期望=$commit，实际=$actual_commit" >&2
+      echo "Pi 来源校验失败：期望=${commit}，实际=${actual_commit}" >&2
       exit 1
     fi
     echo "Pi 已就绪：$source_dir@$actual_commit"

@@ -20,11 +20,11 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22.19.0
           cache: npm
@@ -32,12 +32,15 @@ jobs:
       - name: Install dependencies
         working-directory: agent-core
         run: npm ci --ignore-scripts --no-audit --no-fund
-      - name: Check TypeScript syntax
+      - name: Check TypeScript
         working-directory: agent-core
         run: npm run check
       - name: Run Agent core tests
         working-directory: agent-core
         run: npm test
+      - name: Clean up dependencies
+        if: always()
+        run: rm -rf agent-core/node_modules
 
   swift:
     name: SwiftUI macOS
@@ -45,10 +48,70 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      - name: Setup Node for sidecar integration tests
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22.19.0
+          cache: npm
+          cache-dependency-path: agent-core/package-lock.json
+      - name: Install sidecar dependencies
+        working-directory: agent-core
+        run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Build
         run: swift build --package-path macos/AnotherYou
       - name: Test
         run: swift test --package-path macos/AnotherYou
+      - name: Build development app
+        env:
+          OUTPUT_DIRECTORY: ${{ runner.temp }}/another-you-app
+          BUNDLE_NODE: "1"
+        run: ./scripts/build-app.sh
+      - name: Verify development app
+        run: |
+          APP_PATH="${{ runner.temp }}/another-you-app/Another You.app"
+          test -x "$APP_PATH/Contents/MacOS/AnotherYou"
+          test -x "$APP_PATH/Contents/Resources/runtime/node"
+          test -f "$APP_PATH/Contents/Resources/agent-core/src/cli.ts"
+          plutil -lint "$APP_PATH/Contents/Info.plist"
+          codesign --verify --deep --strict "$APP_PATH"
+          printf '%s\n' '{"op":"status"}' '{"op":"shutdown"}' |
+            "$APP_PATH/Contents/Resources/runtime/node" --experimental-strip-types \
+              "$APP_PATH/Contents/Resources/agent-core/src/cli.ts" --stdio \
+              --config "${{ runner.temp }}/another-you-smoke/config.json" > "${{ runner.temp }}/another-you-events.jsonl"
+          node -e 'const fs = require("node:fs"); const events = fs.readFileSync(process.argv[1], "utf8").trim().split("\n").map(JSON.parse); if (!events.some(e => e.kind === "agent.status") || events.some(e => e.kind === "agent.error")) process.exit(1)' "${{ runner.temp }}/another-you-events.jsonl"
+      - name: Archive development app
+        run: ditto -c -k --sequesterRsrc --keepParent "${{ runner.temp }}/another-you-app/Another You.app" "${{ runner.temp }}/another-you-app/Another-You-macOS.zip"
+      - name: Upload development app
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Another-You-macOS-development-${{ runner.arch }}
+          path: ${{ runner.temp }}/another-you-app/Another-You-macOS.zip
+          retention-days: 7
+          if-no-files-found: error
+      - name: Clean up build artifacts
+        if: always()
+        run: rm -rf macos/AnotherYou/.build agent-core/node_modules "${{ runner.temp }}/another-you-app" "${{ runner.temp }}/another-you-smoke" "${{ runner.temp }}/another-you-events.jsonl"
+
+  website:
+    name: Website and scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22.19.0
+      - name: Check website and scripts
+        run: |
+          test -s website/index.html
+          for file in website/*.js; do node --check "$file"; done
+          bash -n scripts/build-app.sh
+          bash -n agent-core/scripts/bootstrap-pi.sh
+          git diff --check

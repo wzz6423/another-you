@@ -3,12 +3,12 @@
   "dataDir": "~/Library/Application Support/AnotherYou",
   "model": {
     "provider": "local",
-    "model": "local-default",
-    "endpoint": "http://127.0.0.1:11434",
+    "model": "qwen3:8b",
+    "endpoint": "http://127.0.0.1:11434/v1",
     "temperature": 0.2
   },
   "tools": {
-    "filesystem": true,
+    "filesystem": false,
     "shell": false,
     "network": false,
     "calendar": false,

@@ -18,7 +18,7 @@ test("默认配置保持本地优先并关闭网络工具", () => {
   const config = createDefaultConfig("~/another-you-test");
   assert.equal(config.privacy.mode, "strict-local");
   assert.equal(config.privacy.allowNetwork, false);
-  assert.equal(isToolAllowed(config, "filesystem"), true);
+  assert.equal(isToolAllowed(config, "filesystem"), false);
   assert.equal(isToolAllowed(config, "network"), false);
 });
 
