@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "dataDir": "~/Library/Application Support/AnotherYou",
+  "model": {
+    "provider": "local",
+    "model": "local-default",
+    "endpoint": "http://127.0.0.1:11434",
+    "temperature": 0.2
+  },
+  "tools": {
+    "filesystem": true,
+    "shell": false,
+    "network": false,
+    "calendar": false,
+    "notifications": true
+  },
+  "privacy": {
+    "mode": "strict-local",
+    "allowNetwork": false,
+    "allowedNetworkHosts": [],
+    "storePrompts": true,
+    "storeResponses": true,
+    "redactSecrets": true
+  },
+  "scheduler": {
+    "enabled": true,
+    "pollIntervalMs": 30000,
+    "defaultCooldownMs": 1800000,
+    "defaultDedupeWindowMs": 300000
+  }
+}

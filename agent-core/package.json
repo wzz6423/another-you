@@ -1,0 +1,15 @@
+{
+  "name": "@another-you/agent-core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Another You 的本地优先主动式 Agent 核心",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "start": "node --experimental-strip-types src/cli.ts --stdio",
+    "test": "node --experimental-strip-types --test test/*.test.ts",
+    "check": "for file in src/*.ts; do node --experimental-strip-types --check \"$file\"; done"
+  }
+}

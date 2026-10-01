@@ -1,0 +1,8 @@
+{
+  "repository": "https://github.com/earendil-works/pi.git",
+  "legacyRepository": "https://github.com/badlogic/pi-mono.git",
+  "ref": "main",
+  "commit": "8ce69e9d2b171d173fe4b6b2b6256f1f4411e69d",
+  "license": "MIT",
+  "resolvedAt": "2026-10-01"
+}

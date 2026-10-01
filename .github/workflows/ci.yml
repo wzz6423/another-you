@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  agent-core:
+    name: Agent core
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+          cache: npm
+          cache-dependency-path: agent-core/package-lock.json
+      - name: Install dependencies
+        working-directory: agent-core
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Check TypeScript syntax
+        working-directory: agent-core
+        run: npm run check
+      - name: Run Agent core tests
+        working-directory: agent-core
+        run: npm test
+
+  swift:
+    name: SwiftUI macOS
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Build
+        run: swift build --package-path macos/AnotherYou
+      - name: Test
+        run: swift test --package-path macos/AnotherYou
