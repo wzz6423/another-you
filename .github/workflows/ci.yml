@@ -30,14 +30,12 @@ jobs:
           cache: npm
           cache-dependency-path: agent-core/package-lock.json
       - name: Install dependencies
-        working-directory: agent-core
-        run: npm ci --ignore-scripts --no-audit --no-fund
+        run: make deps
       - name: Check TypeScript
         working-directory: agent-core
         run: npm run check
       - name: Run Agent core tests
-        working-directory: agent-core
-        run: npm test
+        run: make test-agent
       - name: Clean up dependencies
         if: always()
         run: rm -rf agent-core/node_modules
@@ -58,17 +56,18 @@ jobs:
           cache: npm
           cache-dependency-path: agent-core/package-lock.json
       - name: Install sidecar dependencies
-        working-directory: agent-core
-        run: npm ci --ignore-scripts --no-audit --no-fund
+        run: make deps
       - name: Build
-        run: swift build --package-path macos/AnotherYou
+        run: make build
       - name: Test
-        run: swift test --package-path macos/AnotherYou
+        run: make test-swift
+      - name: Test development lifecycle
+        run: make test-scripts
       - name: Build development app
         env:
           OUTPUT_DIRECTORY: ${{ runner.temp }}/another-you-app
           BUNDLE_NODE: "1"
-        run: ./scripts/build-app.sh
+        run: make build-package
       - name: Verify development app
         run: |
           APP_PATH="${{ runner.temp }}/another-you-app/Another You.app"
@@ -110,8 +109,8 @@ jobs:
           node-version: 22.19.0
       - name: Check website and scripts
         run: |
+          make help
           test -s website/index.html
           for file in website/*.js; do node --check "$file"; done
-          bash -n scripts/build-app.sh
-          bash -n agent-core/scripts/bootstrap-pi.sh
+          for file in scripts/*.sh agent-core/scripts/*.sh; do bash -n "$file"; done
           git diff --check

@@ -1,24 +1,58 @@
-# 公开来源与采用边界
+# Sources and adoption boundaries
 
-## 底层 Agent
+**English** | [简体中文](sources.zh-CN.md)
 
-- [Pi coding agent](https://github.com/earendil-works/pi)：当前官方上游，MIT；本项目通过 `agent-core/pi-source.lock.json` 锁定完整 commit，并由 `scripts/bootstrap-pi.sh` 拉取到忽略目录。
-- [Pi Agent Core](https://github.com/earendil-works/pi/tree/main/packages/agent)：采用官方 Agent SDK，并显式注入模型、提示词和空工具集。Swift 与本项目 Node sidecar 使用自己的 JSONL 协议。
-- [Pi AI](https://github.com/earendil-works/pi/tree/main/packages/ai)：复用模型调用及流式响应处理。源码 HEAD 与 npm SDK 发布版分别锁定，详见 `agent-core/pi-source.lock.json`。
-- [Pi extensions](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/extensions.md)：后续受控定制的参考；本版不隐式加载用户扩展或技能。
+This page records upstream code and design references. A reference product's features or claims are not evidence that Another You implements them.
 
-`SpoddyCoder/clonepi` 是树莓派磁盘克隆工具，与个人 AI Agent 无关；项目中明确使用的是 Pi coding agent，避免名称歧义。
+## Pi code and locks
 
-## 产品交互参考
+The project uses [Pi](https://github.com/earendil-works/pi), the current upstream recorded in [pi-source.lock.json](../agent-core/pi-source.lock.json). The legacy URL recorded there is `badlogic/pi-mono`. This is the Pi coding-agent project, not the unrelated Raspberry Pi disk-cloning tool named clonepi.
 
-- [Today](https://today.ai/) 和 [产品说明](https://today.ai/articles/blog/what-is-today)：借鉴短简报、可编辑记忆、只在高价值时主动出现，以及外部动作确认后执行。
-- [Google Antigravity 总览](https://antigravity.google/docs/overview/) 与 [功能说明](https://antigravity.google/docs/features/)：借鉴异步任务、计划任务、子 Agent、产物审阅和权限策略。
+| Item | Locked value |
+| --- | --- |
+| Source repository | `https://github.com/earendil-works/pi.git` |
+| Source branch at resolution | `main` |
+| Source snapshot commit | `e792ba131ed0495f3ff58a0eb13f20540e344d5c` |
+| SDK package versions | `@earendil-works/pi-agent-core` and `@earendil-works/pi-ai`, both `0.99.2` |
+| SDK release commit | `005af57d88ee23b33778f343a9595b32e67ff788` |
+| Source lock resolution date | `2026-10-01` |
+| Pi license | MIT |
 
-这些网站的产品文案是设计参考，不是本项目的性能或安全证明；Another You 保持单用户、本地优先和默认不联网。
+The source snapshot and SDK release commit are different on purpose. [package.json](../agent-core/package.json) selects the running SDK versions; [package-lock.json](../agent-core/package-lock.json) fixes their full dependency tree and integrity values. Fetching the source cache does not replace these dependencies.
 
-## 工程参考
+The [Agent package](https://github.com/earendil-works/pi/tree/e792ba131ed0495f3ff58a0eb13f20540e344d5c/packages/agent) provides the agent/session loop; the [AI package](https://github.com/earendil-works/pi/tree/e792ba131ed0495f3ff58a0eb13f20540e344d5c/packages/ai) supplies model calls and stream handling. Another You explicitly supplies the model, system prompt, empty tool list, and guarded fetch. Its Swift/Node JSONL protocol is its own. [Pi extensions](https://github.com/earendil-works/pi/blob/e792ba131ed0495f3ff58a0eb13f20540e344d5c/packages/coding-agent/docs/extensions.md) are a reference for future controlled customization; user extensions and skills are not loaded by this preview.
 
-- 本机 Zisla 的 `swift-tests.yml`、`web-ci.yml`：采用最小权限、并发取消、独立构建检查和始终清理产物的模式；未复制与本项目无关的发布、项目自动化和跨平台流程。
-- 开发使用 development-workflow、agent-reach、octocat 及 UI 技能组织实现和核验。它们属于开发工具，不会作为隐式权限或第三方提示词自动装入用户的助手运行时。
+## Inspect or update the source lock
 
-第三方代码通过包管理器或独立源码缓存使用，保留各自许可证；参考站的品牌资产未纳入应用。
+Run from the repository root:
+
+```bash
+make pi-source
+./agent-core/scripts/bootstrap-pi.sh --print
+./agent-core/scripts/bootstrap-pi.sh --check
+```
+
+`make pi-source` fetches the locked SHA into the ignored `agent-core/.cache/pi`, checks it out with a detached HEAD, and verifies the resulting SHA. `--print` displays the lock without network access. `--check` compares the lock with the remote branch's current head; it can fail after upstream advances even when the local pinned checkout is correct. It does not inspect the local checkout.
+
+If HTTPS Git is unavailable and GitHub SSH is already configured:
+
+```bash
+PI_GIT_TRANSPORT=ssh ./agent-core/scripts/bootstrap-pi.sh fetch
+```
+
+For an intentional source upgrade, `./agent-core/scripts/bootstrap-pi.sh --refresh` updates only `commit` and `resolvedAt` in the source lock. Run `make pi-source` afterward to fetch that snapshot. Review upstream changes before adoption. Updating the running SDK separately requires reviewing `package.json`, `package-lock.json`, and the SDK fields in the source lock, then running the Agent and Swift integration checks.
+
+`PI_SOURCE_DIR` and `PI_SOURCE_LOCK` can override the cache and lock paths. Keep customized upstream work outside a disposable cache or commit it before changing snapshots. The script does not merge private source changes into the runtime.
+
+## Product references
+
+- [Today](https://today.ai/) and its [product introduction](https://today.ai/articles/blog/what-is-today): concise briefings, editable memory as a design idea, selective proactive participation, and review before external actions.
+- [Google Antigravity overview](https://antigravity.google/docs/overview/) and [features](https://antigravity.google/docs/features/): asynchronous work, scheduled work, subagents, artifact review, and permission design as reference ideas. A live visual comparison was not completed during the initial implementation.
+
+Another You currently uses rules, local state, and user-approved text generation. It has no automatic long-term conversation memory or external-action tools. Website graphics and wording belong to this project; reference-site brand assets are not included.
+
+## Engineering and licenses
+
+Zisla's Makefile, bilingual document layout, and CI patterns informed the development entry points: focused checks, minimal workflow permissions, concurrency cancellation, and cleanup. Its release system, update channels, unrelated platforms, and Project automation were not copied. Another You's Project keeps only its Board view and fields; contribution work remains in repository Issues and pull requests.
+
+Development skills are tools for contributors, not implicitly loaded prompts or permissions in the end user's assistant. Third-party code remains in npm packages or the separate source cache and keeps its own license. The project's [MIT license](../LICENSE) does not replace dependency licenses. Bundled Node has its own license; the [packaging script](../scripts/build-app.sh) copies a neighboring `LICENSE` when available, so review license contents before distribution.

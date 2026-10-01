@@ -1,39 +1,60 @@
-# Another You 官网
+# Another You website
 
-无需构建的静态产品页面，以中文介绍主动建议、用户控制和本地运行。页面没有外部字体、分析脚本、联网演示、账号表单或第三方前端依赖。
+**English** | [简体中文](README.zh-CN.md)
 
-## 预览
+A static product page in Chinese, introducing proactive suggestions, user control, and local operation. There is no build step, frontend dependency, external font, analytics script, account form, or live Agent connection.
 
-从仓库根目录运行：
+## Preview
+
+From the repository root:
+
+```bash
+make website
+```
+
+Open [http://127.0.0.1:4173](http://127.0.0.1:4173). Use `make website PORT=4174` to choose another port; stop the foreground server with `Ctrl+C`. Python 3 is required. The equivalent direct command is:
 
 ```bash
 python3 -m http.server 4173 --bind 127.0.0.1 --directory website
 ```
 
-打开 `http://127.0.0.1:4173`。也可以直接打开 `index.html`；剪贴板权限不可用时会自动选中命令，供手动复制。
+You can also open [index.html](index.html) directly. If the browser does not permit clipboard access, the page selects the startup command for manual copying.
 
-## 交互与状态
+## Files and behavior
 
-- 三种触发时机：时间、事件、闲置；支持点击和方向键切换。
-- 每个时机独立保存本次页面中的「生成示例草稿 / 稍后 / 忽略」选择，可随时重置。
-- 演示为浏览器内固定样例，不连接 Agent、不读取设备、不发送通知、不持久保存个人数据。
-- 「为什么现在出现」提供触发原因；启动命令可复制。
-- 支持窄屏、键盘焦点、状态播报和减少动态效果设置。
+| File | Purpose |
+| --- | --- |
+| [index.html](index.html) | Content, navigation, demo controls, startup instructions |
+| [styles.css](styles.css) | Layout, typography, responsive styles, reduced motion |
+| [script.js](script.js) | Scenario selection, demo decisions, reset, copying |
+| [mark.svg](mark.svg) | Project brand mark |
 
-## 部署
+The demo has time, event, and idle scenarios. Clicking a tab or using arrow keys, Home, or End selects a scenario. Each scenario keeps its own draft/snooze/ignore choice in page memory and can be reset independently. Reloading the page clears the choices.
 
-将本目录发布到任意静态托管服务即可；入口是 `index.html`。当前不包含部署配置，也没有发布到公网。
+All drafts and reasons are fixed examples. The page does not read device activity, call a model, send notifications, or persist personal data. Its sample times and cooldown text are illustrative; the runtime defaults are documented in the [CLI reference](../docs/cli-reference.md).
 
-## 内容边界
+## Verification
 
-仓库当前为私有、产品处于开发预览。页面主按钮指向源码运行说明，没有安装包下载。不要在获得验证前将文案改为已发布、已公证、公开开源，或声称邮件、日历、屏幕读取等尚未实现的能力。
-
-设计方向来自用户指定的 Today 和 Google Antigravity。本轮已通过浏览器读取 Today 官方页面；Antigravity 直连与网页阅读均超时，未完成实时视觉核对。页面布局、品牌图形和文案为本项目原创，不复制其他产品素材。Grok Designer 调用返回未授权，因此未取得外部设计建议。
-
-## 检查
+From the repository root:
 
 ```bash
 node --check website/script.js
 ```
 
-浏览器验收应覆盖桌面与手机视口、三种时机、三种回应、重置、方向键、原因展开和复制反馈。截图与测试临时输出应保存在仓库之外。
+For browser verification, check:
+
+- Desktop and narrow mobile layouts, including 320–390 px widths and horizontal overflow.
+- All three scenarios and all three decisions, switching between stored choices, and reset.
+- Tab focus, arrow/Home/End navigation, reason disclosure, and status announcements.
+- Copy success and the manual-selection fallback when clipboard access is denied.
+- Reduced motion and local navigation/asset links.
+
+Syntax checks do not establish visual or interaction quality. Keep screenshots and temporary browser outputs outside the repository and remove them when no longer needed.
+
+## Publishing and content
+
+A static host can serve this directory with `index.html` as its entry point. The repository has no website deployment configuration or established public deployment.
+
+The product is a development preview and its repositories require access. The main call to action leads to source-running instructions, not an installer. Keep the page aligned with implemented behavior: Calendar, Mail, Notes, screen reading, notarized distribution, and automatic updates are not available.
+
+Today and Google Antigravity are design references. The layout, project graphics, and wording are original to this project; reference links and adoption boundaries are in [sources](../docs/sources.md). Project documentation has English and Chinese versions; the website UI itself is currently Chinese only.

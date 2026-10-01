@@ -1,84 +1,88 @@
 # Another You
 
-一个只面向 macOS 的私有化个人 AI 助手。在合适的时间提出下一步，让你决定生成草稿、稍后提醒或忽略。
+**English** | [简体中文](README.zh-CN.md)
 
-SwiftUI 负责原生窗口、菜单栏和设置，Node sidecar 负责主动调度、状态持久化与 Pi Agent SDK。本版以本机模型为默认入口，属于可运行的开发预览。
+A private, local-first personal AI assistant for macOS. It suggests a next step at a suitable moment and lets you generate a draft, snooze the suggestion, or ignore it.
 
-## 本地运行
+SwiftUI provides the native window, menu bar, and settings. A Node sidecar manages rules, local state, and model requests through the official Pi SDK. The app and website currently use Chinese; these project documents are available in both languages.
 
-需要 macOS 14+、Swift 6 工具链、Node 22.19+，以及提供 OpenAI 兼容 API 的本机模型服务。
+**Status: 0.1.0 development preview.** The GitHub and Gitee repositories are private and require access. There is no public installer or automatic update channel.
 
-```bash
-(cd agent-core && npm ci)
-ANOTHER_YOU_AGENT_ROOT="$PWD/agent-core" \
-  swift run --package-path macos/AnotherYou AnotherYou
-```
+## What it does
 
-首次打开后，在设置里填写模型地址和已安装的模型名称。以 Ollama 为例，地址是 `http://127.0.0.1:11434/v1`，模型名须与 `ollama list` 一致。应用不会自动下载模型，服务不可用时会显示错误。
-
-```bash
-# 示例：需要先自行安装 Ollama，然后选择一个适合本机的模型
-ollama pull qwen3:4b
-```
-
-开发环境可通过 `ANOTHER_YOU_NODE` 指定 Node 可执行文件。应用数据保存于 `~/Library/Application Support/AnotherYou/`；配置为 `config.json`，建议及活动记录为 `state.json`。
-
-## 当前能力
-
-- 从启动事件、每日时间和实际闲置时长产生主动建议，带来源说明、冷却与去重。
-- 生成草稿、稍后提醒、忽略和暂停主动提醒；建议状态保存在本机。
-- 通过真实 stdin/stdout JSONL 协议连接 Swift 与 Node，模型请求由官方 Pi SDK 执行。
-- 默认只连接本机回环地址；远程私有模型需在配置中明确授权主机和网络访问。
-- 官网预览展示建议交互和本地启动步骤，不包含追踪脚本或远程提交表单。
-
-尚未接入 Calendar、Mail、Notes 或屏幕内容。当前模型没有文件、Shell、发送消息等工具；“生成草稿”不会对外执行动作。规则产生建议与模型推理是两条明确区分的路径，模型缺失不会伪装为成功。
-
-## 开发应用与官网
-
-```bash
-# 生成本机开发 .app；依赖本机 Node，不可直接分发
-./scripts/build-app.sh
-open "dist/macos/Another You.app"
-
-# 使用 nodejs.org 官方独立二进制内置 Node
-BUNDLE_NODE=1 ANOTHER_YOU_NODE=/path/to/official-node/bin/node \
-  OUTPUT_DIRECTORY=/path/to/new-output ./scripts/build-app.sh
-
-# 官网本地预览
-python3 -m http.server 4173 --bind 127.0.0.1 --directory website
-```
-
-打包脚本只生成当前架构的 ad-hoc 签名开发应用，并拒绝覆盖已有输出。CI 验证通过后保留开发 ZIP 产物 7 天。尚未做 Developer ID 签名、公证、正式下载或自动更新。Gitee 的 GitHub 镜像由仓库所有者配置。
-
-## 项目结构
-
-| 路径 | 职责 |
+| Capability | Current behavior |
 | --- | --- |
-| `macos/AnotherYou` | SwiftUI、菜单栏、设置、sidecar 客户端 |
-| `agent-core` | 调度、持久化、模型隐私策略、Pi SDK |
-| `website` | 官网静态页面及建议交互演示 |
-| `scripts/build-app.sh` | macOS 开发应用打包 |
-| `.github/workflows/ci.yml` | Swift、Agent、官网与打包检查 |
+| Proactive suggestions | Rules respond to app launch, local time, and the Mac's actual idle duration, with reasons, cooldowns, and deduplication. |
+| User decisions | Generate a reviewable draft, snooze for 15 minutes, ignore, or pause proactive suggestions. Decisions and pause state survive restarts. |
+| Model requests | Connect to a local OpenAI-compatible service; explicitly authorized remote services are supported through configuration. |
+| Native notifications | Opt in from a packaged `.app`; new suggestions can notify you while the app is inactive and macOS permission is granted. |
+| Local records | Keep suggestion states and a bounded activity history, with configurable content storage and basic credential redaction. |
 
-## 验证
+The preview has no Calendar, Mail, Notes, or screen-content connector. Models have no file, shell, or message-sending tools. A draft does not perform an external action. Suggestions come from rules; their appearance does not prove that a model is available. Each model request is a separate turn, without automatic conversation memory.
 
-```bash
-(cd agent-core && npm ci)
-npm run check --prefix agent-core
-npm test --prefix agent-core
-swift test --package-path macos/AnotherYou
-bash -n scripts/build-app.sh
-```
+## Get started
 
-测试中的模型服务使用本地 HTTP fixture，不代表真实模型的回答质量。CI 参考 Zisla 的最小权限、并发取消、分模块验证和产物清理，并检查 `.app` 结构、签名及内置 sidecar 的运行。
+You need macOS 14+, a Swift 6 toolchain, and Node.js 22.19+ with npm. A compatible local model service and an already installed model are needed for drafting, but not for viewing rule-based suggestions. Python 3 is only needed for the website preview.
 
-## 上游与定制
-
-使用 MIT 许可的 [Pi](https://github.com/earendil-works/pi)。最新源码提交和生产 SDK 版本分别锁定在 [`agent-core/pi-source.lock.json`](agent-core/pi-source.lock.json)；生产依赖由 `package-lock.json` 固定。定制保留在本项目调度和适配层，不把第三方源码复制进主仓库。
+From the repository root:
 
 ```bash
-# 可选：拉取锁定的上游源码以供研究和定制
-./agent-core/scripts/bootstrap-pi.sh
+make deps
+make run
 ```
 
-架构和隐私边界见 [`docs/architecture.md`](docs/architecture.md)，来源与采用方式见 [`docs/sources.md`](docs/sources.md)。
+`make run` builds and starts `dist/dev/Another You.app`. In **设置 → 本地模型**, enter the service address and the exact installed model name, then choose **保存并重新连接**. For Ollama, the usual address is `http://127.0.0.1:11434/v1`; `ollama list` shows installed model names. Another You does not install a model or start its server.
+
+A saved configuration is not a connection test. Submit a prompt or approve a draft to verify your model; failures appear in the app.
+
+```bash
+make stop    # Stop the development app started from this workspace
+make update  # Rebuild and restart local source; does not run git pull
+```
+
+For direct Swift development and notification requirements, see the [macOS guide](macos/AnotherYou/README.md). For model settings, file locations, and environment variables, see [configuration](docs/configuration.md).
+
+## Development commands
+
+Run `make help` for the available targets.
+
+| Command | Purpose |
+| --- | --- |
+| `make build` | Build the Swift executable. |
+| `make check` | Check TypeScript, website JavaScript, and shell syntax. |
+| `make test` | Run Agent, Swift, and development-script tests. |
+| `make build-package` | Build a separate development `.app` in `dist/macos`. |
+| `make website` | Serve the static website at `http://127.0.0.1:4173`. |
+| `make pi-source` | Fetch the pinned upstream source into `agent-core/.cache/pi`. |
+| `make clean` | Stop the managed development app and remove known build/test outputs. |
+
+`clean` keeps dependencies, the Pi source cache, personal application data, and custom package output directories. The packaging script refuses to overwrite an existing app. See [packaging and release status](docs/releasing.md) for output paths, bundling Node, and CI artifacts.
+
+## Privacy and permissions
+
+The default model endpoint is loopback-only. A remote endpoint requires explicit network permission, an exact allowed hostname, and HTTPS. Build and dependency commands may access npm and GitHub independently of the model policy.
+
+Configuration and state normally live in `~/Library/Application Support/AnotherYou/`. They use local file permissions and configurable storage rules, not application-level encryption. Redaction recognizes common credential patterns; it does not identify every kind of private text. Details are in [configuration](docs/configuration.md) and the [security policy](SECURITY.md).
+
+## Documentation
+
+| Guide | Scope |
+| --- | --- |
+| [macOS](macos/AnotherYou/README.md) | Native app, settings, notifications, troubleshooting |
+| [Agent core](agent-core/README.md) | Runtime development and Pi integration |
+| [Website](website/README.md) | Static preview and interaction checks |
+| [Configuration](docs/configuration.md) | Model, privacy, scheduler, and environment reference |
+| [CLI and JSONL protocol](docs/cli-reference.md) | Commands, events, rules, and proposal states |
+| [Architecture](docs/architecture.md) | Data flow and implementation boundaries |
+| [Packaging and release status](docs/releasing.md) | Development builds and remaining distribution work |
+| [Sources](docs/sources.md) | Upstream locks, licenses, and design references |
+
+## Contributing
+
+Use [GitHub](https://github.com/wzz6423/another-you) for code, Issues, and pull requests. [Gitee](https://gitee.com/wzz6423/another-you) is for mirror access and version distribution; it does not accept Issues or pull requests. The repository owner configures GitHub-to-Gitee mirroring separately.
+
+Read the [contribution guide](CONTRIBUTING.md), [code of conduct](CODE_OF_CONDUCT.md), and [security policy](SECURITY.md) before contributing.
+
+## License
+
+[MIT](LICENSE). Third-party dependencies retain their own licenses; see [sources](docs/sources.md).

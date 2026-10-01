@@ -1,42 +1,60 @@
-# Another You 架构
+# Architecture
 
-## 本版闭环
+**English** | [简体中文](architecture.zh-CN.md)
 
-```text
-SwiftUI 窗口 / 菜单栏 / 本机模型设置
-       │ 启动 Process；stdin 命令 / stdout JSONL 事件
-       ▼
-Agent Core
-  ├─ 时间、应用启动、实际闲置时长 → 调度与冷却去重
-  ├─ 建议状态 → 生成草稿 / 稍后 / 忽略
-  ├─ config.json + state.json → 本机持久化
-  └─ Pi Agent SDK → 受限 fetch → 本机或显式授权的模型服务
+Another You separates native presentation, proactive state, and model requests. This keeps user decisions visible and gives model access a narrow boundary. The current preview supports one local user and one active model request per sidecar.
+
+## Data flow
+
+```mermaid
+flowchart TD
+    UI[SwiftUI window and menu bar] <--> Store[AssistantStore]
+    Idle[Mac idle duration] --> Store[AssistantStore]
+    Store <--> Client[ProcessAgentClient]
+    Client <-->|stdin commands / stdout JSONL| Core[AgentCore]
+    Core --> Rules[ProactiveScheduler]
+    Core <--> State[Local state.json]
+    Settings[Local config.json] --> Core
+    Core --> Pi[PiSdkBackend: tools disabled]
+    Pi --> Fetch[Guarded HTTP fetch]
+    Fetch --> Model[Loopback or explicitly allowed model service]
+    Store --> Notifications[Opt-in macOS notifications]
 ```
 
-Swift 的 `AgentClient` 管理进程、分段输出缓冲、事件解码和生命周期，`AssistantStore` 将真实事件转换为界面状态。Node 的 `AgentCore` 管理业务状态，`ProactiveScheduler` 只判断规则，`PiSdkBackend` 负责调用模型。
+[AgentClient.swift](../macos/AnotherYou/Sources/AnotherYouCore/AgentClient.swift) owns process launch, JSONL framing, decoding, and shutdown. [AssistantStore.swift](../macos/AnotherYou/Sources/AnotherYouCore/AssistantStore.swift) updates cards and activity from real events, correlates prompt responses, and supplies idle measurements. It does not treat a sent command as a completed action.
 
-## 主动参与
+[AgentCore](../agent-core/src/index.ts) owns proposal transitions and persisted history. [ProactiveScheduler](../agent-core/src/scheduler.ts) matches time, event, and idle rules and applies cooldown/deduplication. [PiSdkBackend](../agent-core/src/pi-adapter.ts) validates the endpoint and calls the configured model.
 
-第一版主动性来自可解释的规则。应用启动、每日简报时刻或满足阈值的真实闲置时长会产生建议。建议说明依据，不编造日历、联系人、屏幕或工作活动。规则经过冷却和去重，暂停状态跨重启保存，稍后处理的建议在约定时间重新进入待处理状态。
+## Why suggestions do not require a model
 
-建议出现时不调用外部执行工具。用户选择生成草稿后，Pi 才依据该建议及明确上下文请求模型。完成或失败由事件回传；客户端不能仅因发送命令就将动作标为成功。
+Proactive participation currently comes from explainable rules. App launch, a local-time match, or a measured idle threshold can create a pending suggestion without a model request. The text explains the available signal; it does not infer unseen calendar entries, contacts, screen contents, or work activity.
 
-## 运行时与数据边界
+A rule cannot create another suggestion while its previous proposal is pending, running, snoozed, or failed. Cooldowns and hashed deduplication keys further limit repetition. Snoozed suggestions keep their identity when they return. Pause and proposal state survive restarts; an interrupted generation returns as failed and needs a new user decision.
 
-- 默认模型提供方为 `local`，只允许回环 HTTP(S) 地址。
-- 远程模型必须显式开启网络并列出允许的主机，使用 HTTPS；模型请求拒绝重定向和跨来源跳转。
-- 模型 Agent 使用空工具集，不自动加载用户 Pi 扩展、配置、技能或环境中的默认供应商凭据。
-- 远程密钥只能通过显式配置的环境变量引用；本版 Swift 设置只编辑本机模型，不提供密钥输入。
-- 配置和状态文件位于应用数据目录，按当前用户权限创建；不宣称磁盘加密。
-- 记录保留和基础密钥遮盖由配置控制。遮盖是有限的模式匹配，不能代替不收集敏感数据。
-- stdout 只输出协议 JSONL；诊断信息写 stderr，避免破坏 Swift 解码。
+Choosing to generate a draft sends the proposal's title, summary, and explicit context to the model. Direct questions send the submitted prompt. Each request starts a new Pi session without automatic conversation memory. Completed text is for review: it does not send a message, modify a file, or execute a command.
 
-## 开发与分发
+The app and sidecar must be running for signals to be processed. Time rules match the current local minute; missed time slots are not replayed. Snoozed proposals are restored on the next eligible tick after their due time. See the [CLI reference](cli-reference.md) for states and rules.
 
-源码运行时，Swift 查找明确的环境变量及开发目录；开发 `.app` 从资源目录加载 sidecar。打包脚本可以内置独立的官方 Node，也可在本机开发模式使用系统 Node。Homebrew 动态链接的 Node 不能直接作为可分发的单文件运行时。
+## Runtime and data boundaries
 
-Pi SDK 发布版与最新上游源码可能处于不同提交，两者在 lock 中分别记录。升级需要审阅依赖锁与集成测试结果。
+| Boundary | Current implementation |
+| --- | --- |
+| Model network | `local` uses loopback only. Non-loopback requests require an authorized privacy mode, network opt-in, exact allowed hostname, and HTTPS. Each fetch rejects redirects and leaving the configured origin. |
+| Model tools | Pi receives an empty tool list; attempted tool calls are blocked. User Pi configuration, extensions, skills, and default provider credentials are not loaded. |
+| Model credentials | The explicit `apiKeyEnv` name points to the sidecar process environment. The Swift settings screen has no remote-key input or Keychain integration. |
+| Persisted content | Storage switches and basic credential redaction apply when saving state. They do not filter live model input/output or encrypt files. |
+| Native notifications | `AssistantStore` uses a separate UserDefaults preference and macOS authorization. The app must be bundled, inactive, and unpaused when a new suggestion arrives. `tools.notifications` is not this switch. |
+| Process isolation | Swift and Node communicate through pipes; these processes are not an operating-system sandbox for untrusted code. |
+| Development traffic | npm installs and Git source fetches operate separately from the model network policy. |
 
-## 下一阶段
+Configuration and state use local file permissions. History is bounded, but unresolved suggestions are retained. Errors from malformed state are reported rather than silently resetting it. Exact defaults, file locations, retention, and the limits of redaction are in [configuration](configuration.md).
 
-Calendar / Notes 等连接器、长期记忆管理、Keychain 远程密钥、外部动作审批与撤销属于后续里程碑。接入时应在这里补充实际数据流和权限范围。正式分发还需要 Developer ID 签名、公证、架构矩阵和更新渠道。
+## Development and packaging
+
+Source runs resolve an explicit Agent path or nearby development checkout; app bundles carry the sidecar in their resources. Node can come from an explicit path, the bundle, or the machine. The package script can copy a self-contained official Node binary; a dynamically linked Homebrew Node is not accepted for single-file bundling.
+
+The npm SDK release and cached upstream source snapshot have separate locks. The cache is for review/customization and does not replace the SDK used by the running app. See [sources](sources.md) and [packaging](releasing.md).
+
+## Remaining work
+
+Calendar/Mail/Notes connectors, managed long-term memory, Keychain-backed remote credentials, external actions with approval/reversal, launch at login, and automatic updates are not implemented. Any such feature needs an explicit data flow, permission boundary, and corresponding validation before being described as available. Developer ID distribution, notarization, and an architecture release matrix also remain separate work.
