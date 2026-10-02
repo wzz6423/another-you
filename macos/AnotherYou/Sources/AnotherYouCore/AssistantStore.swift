@@ -4,11 +4,28 @@ import CoreGraphics
 import Foundation
 import UserNotifications
 
+enum InputDraftLocation: Hashable {
+    case conversation, quickChat
+}
+
+@MainActor
+final class InputDraft: ObservableObject {
+    @Published fileprivate(set) var text = ""
+}
+
 @MainActor
 public final class AssistantStore: ObservableObject {
     @Published public private(set) var cards: [ProactiveCard] = []
+    @Published public private(set) var usageRecords: [UsageRecord] = []
     @Published public private(set) var history: [AgentEvent] = []
     @Published public private(set) var conversation: [ConversationMessage] = []
+    @Published public private(set) var sessions: [ConversationSession] = []
+    @Published public private(set) var selectedConversationID: String?
+    @Published public private(set) var pendingConversationActions: Set<String> = []
+    @Published public private(set) var conversationActionError: String?
+    @Published public private(set) var isLoadingConversation = false
+    private var conversationReadID: String?
+    private var sentAttachments: [String: [ScreenAttachment]] = [:]
     @Published public private(set) var lastUpdated: Date?
     @Published public private(set) var statusMessage = "Agent 未启动"
     @Published public private(set) var connection: ConnectionState = .stopped
@@ -16,51 +33,116 @@ public final class AssistantStore: ObservableObject {
     @Published public private(set) var isChangingPause = false
     @Published public private(set) var isRestarting = false
     @Published public private(set) var modelConfigured = false
-    @Published public private(set) var modelMessage = "请在设置中连接本地模型。"
-    @Published public private(set) var settings: AgentSettings
+    @Published public private(set) var modelMessage = "请在设置中选择模型并配置账户"
+    @Published public private(set) var modelName = ""
+    @Published public private(set) var modelProvider = ""
+    @Published public private(set) var reasoningEffort = ""
     @Published public private(set) var pendingActions: Set<String> = []
     @Published public private(set) var notificationsEnabled: Bool
     @Published public private(set) var notificationMessage: String?
-    @Published public private(set) var settingsError: String?
+    @Published public private(set) var appearance: AppAppearance
+    private var inputDrafts: [InputDraftLocation: InputDraft] = [:]
+    public let updates: UpdateController
+    public let desktop: DesktopSession
+    public let proactiveContext: ProactiveContextSession
+    public let modelSettings = ModelConfigurationSession()
+    public var modelsFileURL: URL { repository.piDirectory.appendingPathComponent("models.json") }
 
     private let agent: any AgentClient
     private let repository: AgentSettingsRepository
     private let defaults: UserDefaults
     private var idleTask: Task<Void, Never>?
     private var hasSentLaunchSignal = false
+    private var isShuttingDown = false
+    private var hasActiveBackgroundAnalysis = false
+    private var desktopObservation: AnyCancellable?
 
     public init(
         client: any AgentClient = ProcessAgentClient(),
         repository: AgentSettingsRepository = AgentSettingsRepository(),
-        defaults: UserDefaults = .standard
+        defaults: UserDefaults = .standard,
+        updater: UpdateController? = nil,
+        desktop: DesktopSession = DesktopSession(),
+        contextCollector: any ContextCollecting = SystemContextCollector()
     ) {
         self.agent = client
         self.repository = repository
         self.defaults = defaults
+        self.desktop = desktop
+        proactiveContext = ProactiveContextSession(collector: contextCollector)
+        appearance = AppAppearance(rawValue: defaults.string(forKey: "appearance") ?? "") ?? .system
+        updates = updater ?? UpdateController(defaults: defaults)
         notificationsEnabled = defaults.bool(forKey: "notificationsEnabled")
-        do { settings = try repository.load() }
-        catch {
-            settings = AgentSettings()
-            settingsError = "无法读取配置：\(error.localizedDescription)"
-        }
         agent.onMessage = { [weak self] message in self?.receive(message) }
+        updates.isIdle = { [weak self] in self?.canInstallUpdate == true }
+        desktop.canStartOperation = { [weak self] in
+            guard let self else { return false }
+            return !self.updates.isInstalling && !self.isShuttingDown
+        }
+        desktopObservation = desktop.objectWillChange.sink { [weak self] in
+            self?.scheduleUpdateInstallation()
+        }
+        modelSettings.sendCommand = { [weak self] command in self?.send(command) == true }
+        modelSettings.canStartOperation = { [weak self] in
+            guard let self else { return false }
+            return self.isConnected && !self.hasPendingPrompt && !self.hasActiveBackgroundAnalysis
+                && !self.cards.contains { $0.state == .running } && self.pendingActions.isEmpty
+                && !self.updates.isInstalling && !self.isShuttingDown
+        }
+        appearance.apply()
+    }
+
+    public func setAppearance(_ appearance: AppAppearance) {
+        self.appearance = appearance
+        defaults.set(appearance.rawValue, forKey: "appearance")
+        appearance.apply()
     }
 
     public var isConnected: Bool { connection == .connected }
     public var completedCount: Int { cards.filter { $0.state == .completed }.count }
     public var pendingCount: Int { cards.filter { $0.state == .pending }.count }
-    public var hasPendingPrompt: Bool { conversation.contains(where: \.isPending) }
+    public var hasPendingPrompt: Bool { conversation.contains(where: \.isPending) || sessions.contains { $0.state == "running" } }
+    public var canInstallUpdate: Bool {
+        !hasPendingPrompt && !cards.contains(where: { $0.state == .running }) && pendingActions.isEmpty
+            && !desktop.isCapturing && desktop.activity == nil && desktop.attachments.isEmpty
+            && !isChangingPause && !isRestarting && !isShuttingDown && connection != .starting
+            && inputDrafts.values.allSatisfy { $0.text.isEmpty }
+            && !hasActiveBackgroundAnalysis
+            && !modelSettings.isBusy && pendingConversationActions.isEmpty && !isLoadingConversation
+    }
+
+    func draft(for location: InputDraftLocation) -> InputDraft {
+        if let draft = inputDrafts[location] { return draft }
+        let draft = InputDraft()
+        inputDrafts[location] = draft
+        return draft
+    }
+
+    func inputDraft(for location: InputDraftLocation) -> String { inputDrafts[location]?.text ?? "" }
+
+    func setInputDraft(_ text: String, for location: InputDraftLocation) {
+        guard !updates.isInstalling else { return }
+        let draft = draft(for: location)
+        guard draft.text != text else { return }
+        draft.text = text
+        if text.isEmpty { scheduleUpdateInstallation() }
+    }
+
+    private func scheduleUpdateInstallation() {
+        DispatchQueue.main.async { [weak self] in self?.updates.installWhenIdle() }
+    }
     public var notificationSupported: Bool {
         Bundle.main.bundleURL.pathExtension == "app" && Bundle.main.bundleIdentifier != nil
     }
-    public var activeCards: [ProactiveCard] { cards.filter { $0.state != .ignored } }
+    public var activeCards: [ProactiveCard] { cards.filter { $0.state != .ignored && !$0.archived } }
     public var nextDueDate: Date? { cards.filter { $0.state == .snoozed }.compactMap(\.snoozedUntil).min() }
     public var activityHistory: [AgentEvent] {
-        history.filter { ["proactive.suggestion", "proposal.updated", "agent.response", "agent.error"].contains($0.kind) }
+        history.filter { $0.activityCategory != nil }
     }
 
     public func connect() {
-        guard !isConnected, connection != .starting, !isRestarting else { return }
+        updates.start()
+        guard !isConnected, connection != .starting, !isRestarting, !updates.isInstalling else { return }
         hasSentLaunchSignal = false
         do {
             try repository.ensureConfig()
@@ -74,6 +156,9 @@ public final class AssistantStore: ObservableObject {
     }
 
     public func shutdown() async {
+        isShuttingDown = true
+        proactiveContext.cancel()
+        desktop.cancel()
         idleTask?.cancel()
         await agent.stop()
     }
@@ -85,12 +170,13 @@ public final class AssistantStore: ObservableObject {
     }
 
     public func apply(_ action: CardAction, to card: ProactiveCard) {
-        guard isConnected, !pendingActions.contains(card.id),
+        guard isConnected, !updates.isInstalling, !pendingActions.contains(card.id),
               card.state == .pending || card.state == .failed || card.state == .snoozed else { return }
         if action == .execute && !modelConfigured {
-            statusMessage = "请先在设置中连接本地模型。"
+            statusMessage = "请先在设置中选择模型并配置账户。"
             return
         }
+        if action == .execute && modelSettings.isBusy { return }
         pendingActions.insert(card.id)
         if !send(["op": .string("decide"), "suggestionId": .string(card.id), "decision": .string(action.rawValue)]) {
             pendingActions.remove(card.id)
@@ -99,34 +185,108 @@ public final class AssistantStore: ObservableObject {
 
     @discardableResult
     public func ask(_ prompt: String) -> Bool {
-        let prompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !prompt.isEmpty, isConnected, modelConfigured, !hasPendingPrompt else { return false }
+        var prompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        if prompt.isEmpty && !desktop.attachments.isEmpty { prompt = "请分析截图及应用上下文。" }
+        guard !prompt.isEmpty, isConnected, modelConfigured, !hasPendingPrompt, !updates.isInstalling, !modelSettings.isBusy, !selectedConversationArchived, !isLoadingConversation else { return false }
         let id = UUID().uuidString
-        conversation.append(ConversationMessage(id: id, prompt: prompt))
-        if !send(["op": .string("prompt"), "requestId": .string(id), "prompt": .string(prompt)]) {
+        let sessionID = selectedConversationID ?? UUID().uuidString
+        selectedConversationID = sessionID
+        sentAttachments[id] = desktop.attachments
+        conversation.append(ConversationMessage(id: id, prompt: prompt, attachments: desktop.attachments))
+        let captures = desktop.attachments.map(\.payload)
+        if !send(["op": .string("prompt"), "requestId": .string(id), "conversationId": .string(sessionID), "prompt": .string(prompt),
+                  "attachments": .array(captures), "allowForeground": .bool(desktop.allowForeground)]) {
             conversation[conversation.count - 1].error = statusMessage
             return false
         }
+        desktop.clearAttachments()
         return true
     }
 
-    public func saveSettings(_ settings: AgentSettings) async -> Bool {
-        guard !isRestarting else { return false }
-        do {
-            let validated = try settings.validated()
-            try repository.save(validated)
-            self.settings = validated
-            settingsError = nil
-            isRestarting = true
-            idleTask?.cancel()
-            await agent.stop()
-            isRestarting = false
-            connect()
-            return true
-        } catch {
-            settingsError = error.localizedDescription
-            return false
+    public func newConversation() {
+        guard !hasPendingPrompt else { return }
+        selectedConversationID = nil
+        conversation = []
+        finishConversationRead()
+    }
+
+    public func selectConversation(_ id: String) {
+        guard !hasPendingPrompt, let session = sessions.first(where: { $0.id == id }) else { return }
+        selectedConversationID = id
+        conversationActionError = nil
+        conversation = messagesWithAttachments(session.messages)
+        let readID = UUID().uuidString
+        conversationReadID = readID
+        isLoadingConversation = true
+        if !send(["op": .string("conversationRead"), "conversationId": .string(id), "readId": .string(readID)]) {
+            conversationActionError = statusMessage
+            finishConversationRead()
         }
+    }
+
+    private func finishConversationRead() {
+        conversationReadID = nil
+        isLoadingConversation = false
+    }
+
+    private func consumeConversationMessages(_ payload: [String: JSONValue]) {
+        guard let readID = payload["readId"]?.string, readID == conversationReadID,
+              payload["conversationId"]?.string == selectedConversationID else { return }
+        defer { finishConversationRead() }
+        guard let value = payload["conversation"]?.object,
+              let session = ConversationSession(payload: value), session.id == selectedConversationID else {
+            conversationActionError = AppLocalization.text("无法读取会话内容，请重试。")
+            return
+        }
+        conversation = messagesWithAttachments(session.messages)
+        if let index = sessions.firstIndex(where: { $0.id == session.id }) { sessions[index] = session }
+    }
+
+    public func manageConversation(_ id: String, action: String) {
+        guard isConnected, !updates.isInstalling, !pendingConversationActions.contains(id) else { return }
+        conversationActionError = nil
+        pendingConversationActions.insert(id)
+        if !send(["op": .string("conversationAction"), "conversationId": .string(id), "action": .string(action)]) {
+            pendingConversationActions.remove(id)
+            conversationActionError = statusMessage
+        }
+    }
+
+    public var selectedConversationArchived: Bool {
+        sessions.first { $0.id == selectedConversationID }?.archived == true
+    }
+
+    private func messagesWithAttachments(_ messages: [ConversationMessage]) -> [ConversationMessage] {
+        messages.map { message in
+            var value = message
+            value.attachments = sentAttachments[message.id] ?? []
+            return value
+        }
+    }
+
+    private func consumeSessions(_ payload: [String: JSONValue]) {
+        guard let values = payload["conversations"]?.array else { return }
+        let previous = Dictionary(uniqueKeysWithValues: sessions.map { ($0.id, $0.messages) })
+        let decoded = values.compactMap { value -> ConversationSession? in
+            guard let payload = value.object, var session = ConversationSession(payload: payload) else { return nil }
+            if payload["messages"] == nil {
+                session.messages = session.id == selectedConversationID ? conversation : previous[session.id] ?? []
+            }
+            return session
+        }.sorted { $0.updatedAt > $1.updatedAt }
+        setIfChanged(\.sessions, to: decoded)
+        if let id = selectedConversationID {
+            if let session = sessions.first(where: { $0.id == id }) { setIfChanged(\.conversation, to: messagesWithAttachments(session.messages)) }
+            else if !conversation.contains(where: \.isPending) { selectedConversationID = nil; conversation = []; finishConversationRead() }
+        }
+        let retained = Set(sessions.flatMap { $0.messages.map(\.id) } + conversation.map(\.id))
+        sentAttachments = sentAttachments.filter { retained.contains($0.key) }
+
+    }
+
+    public func stopCurrentTask() {
+        desktop.cancel()
+        if isConnected { send(["op": .string("cancel")]) }
     }
 
     public func setNotificationsEnabled(_ enabled: Bool) async {
@@ -149,52 +309,114 @@ public final class AssistantStore: ObservableObject {
     }
 
     private func receive(_ message: AgentClientMessage) {
+        defer {
+            modelSettings.updateConnection(connected: isConnected, busy: hasPendingPrompt || hasActiveBackgroundAnalysis
+                || cards.contains { $0.state == .running } || !pendingActions.isEmpty || updates.isInstalling)
+            updates.installWhenIdle()
+        }
         switch message {
         case .connection(let state):
-            connection = state
-            statusMessage = state.label
-            if case .failed(let error) = state { statusMessage = error }
+            setIfChanged(\.connection, to: state)
+            if case .failed(let error) = state { setIfChanged(\.statusMessage, to: error) }
+            else { setIfChanged(\.statusMessage, to: state.label) }
             if state == .connected {
                 if !hasSentLaunchSignal {
                     hasSentLaunchSignal = true
+                    send(["op": .string("contextCapabilities"), "sources": .array([.string("work"), .string("notifications")])])
                     send(["op": .string("signal"), "signal": .object(["type": .string("event"), "name": .string("app-launched")])])
                 }
                 startIdleSampling()
             } else if state != .starting {
+                proactiveContext.cancel()
+                desktop.cancel()
+                hasActiveBackgroundAnalysis = false
                 idleTask?.cancel()
                 pendingActions.removeAll()
+                if !pendingConversationActions.isEmpty { conversationActionError = state.label }
+                pendingConversationActions.removeAll()
+                finishConversationRead()
                 isChangingPause = false
                 for index in conversation.indices where conversation[index].isPending {
                     conversation[index].error = "Agent 连接已断开，请重新连接后重试。"
                 }
             }
-        case .protocolError(let error): statusMessage = error
+        case .protocolError(let error):
+            statusMessage = error
+            if isLoadingConversation { conversationActionError = error; finishConversationRead() }
         case .event(let event): consume(event)
         }
     }
 
     private func consume(_ event: AgentEvent) {
-        lastUpdated = event.date
+        if modelSettings.consume(event) { return }
+        if event.kind == "context.request" || event.kind == "context.cancel" {
+            guard !paused, !isShuttingDown, !isRestarting else { proactiveContext.cancel(); return }
+            proactiveContext.handle(event) { [weak self] command in _ = self?.send(command) }
+            return
+        }
+        if event.kind == "desktop.request" || event.kind == "desktop.cancel" {
+            desktop.handle(event) { [weak self] command in _ = self?.send(command) }
+            return
+        }
+        setIfChanged(\.lastUpdated, to: event.date)
         let payload = event.payload
         switch event.kind {
         case "agent.status":
-            paused = payload["paused"]?.bool ?? !(payload["schedulerEnabled"]?.bool ?? true)
-            isChangingPause = false
+            consumeSessions(payload)
+            if let status = payload["proactive"]?.object { proactiveContext.update(status) }
+            hasActiveBackgroundAnalysis = payload["proactive"]?.object?["running"]?.bool ?? false
+            setIfChanged(\.paused, to: payload["paused"]?.bool ?? !(payload["schedulerEnabled"]?.bool ?? true))
+            if paused { proactiveContext.cancel() }
+            setIfChanged(\.isChangingPause, to: false)
             if let model = payload["model"]?.object {
-                modelConfigured = model["configured"]?.bool ?? false
-                let name = model["model"]?.string ?? settings.model
-                modelMessage = model["message"]?.string ?? (modelConfigured ? "本地模型：\(name)" : "请在设置中连接本地模型。")
+                modelSettings.updateModelStatus(model)
+                setIfChanged(\.modelConfigured, to: model["configured"]?.bool ?? false)
+                setIfChanged(\.modelName, to: model["model"]?.string ?? "")
+                setIfChanged(\.modelProvider, to: model["provider"]?.string ?? "")
+                setIfChanged(\.reasoningEffort, to: model["reasoningEffort"]?.string ?? "")
+                setIfChanged(\.modelMessage, to: model["message"]?.string ?? (modelConfigured ? "正在使用 Pi 模型" : "请在设置中选择模型并配置账户"))
             }
             if let proposals = payload["proposals"]?.array {
-                cards = proposals.compactMap { $0.object.flatMap { ProactiveCard(payload: $0) } }.sorted { $0.createdAt > $1.createdAt }
-                pendingActions.formIntersection(Set(cards.filter { $0.state == .pending }.map(\.id)))
+                setIfChanged(\.cards, to: proposals.compactMap { $0.object.flatMap { ProactiveCard(payload: $0) } }.sorted { $0.createdAt > $1.createdAt })
+                setIfChanged(\.pendingActions, to: pendingActions.intersection(Set(cards.filter { $0.state == .pending }.map(\.id))))
             }
             if let past = payload["history"]?.array,
                let data = try? JSONEncoder().encode(past),
                let events = try? JSONDecoder().decode([AgentEvent].self, from: data) {
                 mergeHistory(events)
             }
-            statusMessage = paused ? "主动建议已暂停" : "正在留意时间与闲置状态"
+            if let records = payload["usageRecords"]?.array,
+               let data = try? JSONEncoder().encode(records),
+               let decoded = try? JSONDecoder().decode([UsageRecord].self, from: data) {
+                setIfChanged(\.usageRecords, to: decoded)
+            }
+            setIfChanged(\.statusMessage, to: paused ? "主动建议已暂停" : "正在按节奏留意工作与通知")
+        case "conversation.messages": consumeConversationMessages(payload)
+        case "conversation.updated":
+            consumeSessions(payload)
+            if let values = payload["proposals"]?.array {
+                setIfChanged(\.cards, to: values.compactMap { $0.object.flatMap { ProactiveCard(payload: $0) } }.sorted { $0.createdAt > $1.createdAt })
+            }
+            if let id = payload["conversationId"]?.string {
+                pendingConversationActions.remove(id)
+                if payload["action"]?.string == "delete" {
+                    history.removeAll { $0.payload["conversationId"]?.string == id || $0.payload["suggestionId"]?.string == id }
+                }
+            }
+        case "agent.activity", "agent.request": mergeHistory([event])
+        case "agent.usage":
+            var record = payload
+            record["id"] = .string(event.id)
+            record["occurredAt"] = .string(event.occurredAt)
+            if let data = try? JSONEncoder().encode(record),
+               let decoded = try? JSONDecoder().decode(UsageRecord.self, from: data),
+               !usageRecords.contains(where: { $0.id == decoded.id }) {
+                let cutoff = Date().addingTimeInterval(-30 * 86400)
+                usageRecords = (usageRecords + [decoded]).filter { (AgentEvent.date(from: $0.occurredAt) ?? .distantPast) >= cutoff }
+            }
+        case "proactive.status":
+            proactiveContext.update(payload)
+            hasActiveBackgroundAnalysis = payload["running"]?.bool ?? false
         case "proactive.suggestion":
             if let card = ProactiveCard(payload: payload, event: event) {
                 if let index = cards.firstIndex(where: { $0.id == card.id }) { cards[index] = card }
@@ -225,6 +447,8 @@ public final class AssistantStore: ObservableObject {
             if let requestID = payload["requestId"]?.string,
                let index = conversation.firstIndex(where: { $0.id == requestID }) { conversation[index].error = error }
             if let suggestionID = payload["suggestionId"]?.string { pendingActions.remove(suggestionID) }
+            if let id = payload["conversationId"]?.string, pendingConversationActions.remove(id) != nil { conversationActionError = error }
+            if payload["readId"]?.string == conversationReadID, conversationReadID != nil { conversationActionError = error; finishConversationRead() }
             isChangingPause = false
             mergeHistory([event])
         default: break
@@ -233,9 +457,13 @@ public final class AssistantStore: ObservableObject {
 
     private func mergeHistory(_ events: [AgentEvent]) {
         var existing = Set(history.map(\.id))
-        history += events.filter { existing.insert($0.id).inserted }
-        history.sort { $0.occurredAt > $1.occurredAt }
-        if history.count > 200 { history = Array(history.prefix(200)) }
+        let additions = events.filter { existing.insert($0.id).inserted }
+        guard !additions.isEmpty else { return }
+        setIfChanged(\.history, to: Array((history + additions).sorted { $0.occurredAt > $1.occurredAt }.prefix(200)))
+    }
+
+    private func setIfChanged<Value: Equatable>(_ keyPath: ReferenceWritableKeyPath<AssistantStore, Value>, to value: Value) {
+        if self[keyPath: keyPath] != value { self[keyPath: keyPath] = value }
     }
 
     @discardableResult

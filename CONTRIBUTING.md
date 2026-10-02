@@ -2,7 +2,7 @@
 
 **English** | [简体中文](CONTRIBUTING.zh-CN.md)
 
-This guide is for contributors with access to the private repository. Use GitHub for development; Gitee provides mirror access and version distribution only.
+Contributions to this open-source project are welcome. Use GitHub for development; Gitee provides mirror access and version distribution only.
 
 The GitHub Project keeps its Board view and field configuration only. Do not create task cards or automatically add Issues or pull requests to it. Continue normal Issue and pull request work in the GitHub repository.
 

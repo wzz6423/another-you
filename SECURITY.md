@@ -9,7 +9,7 @@ Another You is a 0.1.0 development preview. Security work currently targets the 
 The current boundaries are:
 
 - Default model requests use a loopback endpoint. Remote requests require explicit host and network authorization and HTTPS; redirects are rejected.
-- Model sessions have an empty tool list and do not load the user's Pi configuration, skills, or extensions.
+- Interactive model sessions can execute file, shell, network, and browser tools. Native computer tools require macOS permissions and respect the foreground-control option. The user's Pi configuration, skills, and extensions are not loaded.
 - API keys are referenced by a configured environment-variable name, not stored as `apiKey` or `api_key` in model configuration.
 - State and configuration use local file permissions. They are not encrypted by the app; the process is not an operating-system sandbox for untrusted code.
 - Content-storage switches and credential redaction apply to persisted state, not to live model requests or every kind of sensitive text.

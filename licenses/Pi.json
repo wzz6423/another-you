@@ -1,0 +1,8 @@
+{
+  "name": "Pi SDK",
+  "version": "0.99.2",
+  "license": "MIT",
+  "commit": "005af57d88ee23b33778f343a9595b32e67ff788",
+  "source": "https://raw.githubusercontent.com/earendil-works/pi/005af57d88ee23b33778f343a9595b32e67ff788/LICENSE",
+  "licenseSHA256": "0457f5bcec3b3b211605dfb5d1a49042fd638f3686a410fe099c24a25af13c48"
+}

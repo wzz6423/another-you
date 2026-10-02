@@ -1,14 +1,21 @@
 import type { AgentConfig } from "./config.ts";
 import { EventBus, type AgentEvent } from "./events.ts";
-import { PiSdkBackend, type PiAgentBackend } from "./pi-adapter.ts";
+import { PiSdkBackend, type PiAgentBackend, type PiRequest, type PiResponse, type PiRunUsage } from "./pi-adapter.ts";
 import { ProactiveScheduler, type SchedulerSignal, type TriggerRule } from "./scheduler.ts";
-import { StateStore, type Proposal, type ProposalDecision } from "./state.ts";
+import { StateStore, type Proposal, type ProposalDecision, type ConversationSession } from "./state.ts";
+import { ProactiveCoordinator, type ContextResult } from "./proactive.ts";
 
+import { retainedUsage, type UsageRecord } from "./usage.ts";
+import { parseAttachments } from "./desktop-bridge.ts";
+
+export * from "./usage.ts";
 export * from "./config.ts";
 export * from "./events.ts";
 export * from "./pi-adapter.ts";
 export * from "./scheduler.ts";
 export * from "./state.ts";
+export * from "./proactive.ts";
+export * from "./proactive-config.ts";
 
 export const DEFAULT_RULES: TriggerRule[] = [
   { id: "welcome", type: "event", eventName: "app-launched", title: "给今天留一个起点", message: "可以一起梳理今天的优先事项。当前未连接日历或任务来源，你可以先告诉我最想推进的一件事。", cooldownMs: 24 * 60 * 60_000 },
@@ -28,13 +35,17 @@ export class AgentCore {
   readonly scheduler: ProactiveScheduler;
   readonly backend: PiAgentBackend;
   readonly config: AgentConfig;
+  readonly proactive: ProactiveCoordinator;
   private readonly clock: () => Date;
   private readonly store: StateStore;
   private readonly proposals = new Map<string, Proposal>();
   private history: AgentEvent[] = [];
+  private usageRecords: UsageRecord[] = [];
+  private readonly conversations = new Map<string, ConversationSession>();
   private paused = false;
   private timer: ReturnType<typeof setInterval> | undefined;
   private started = false;
+  private foregroundBusy = false;
 
   constructor(options: AgentCoreOptions) {
     this.config = options.config;
@@ -43,15 +54,23 @@ export class AgentCore {
     const saved = this.store.load();
     this.paused = saved?.paused ?? false;
     this.history = saved?.history ?? [];
+    this.usageRecords = retainedUsage(saved?.usageRecords ?? [], this.clock());
+    for (const session of saved?.conversations ?? []) this.conversations.set(session.id, session);
     for (const proposal of saved?.proposals ?? []) this.proposals.set(proposal.id, proposal);
     this.events = new EventBus();
     this.scheduler = new ProactiveScheduler(options.rules ?? saved?.rules ?? DEFAULT_RULES, this.events, {
       defaults: options.config.scheduler,
       now: this.clock,
-      shouldFire: (ruleId) => ![...this.proposals.values()].some((proposal) => proposal.ruleId === ruleId && ["pending", "running", "snoozed", "failed"].includes(proposal.state)),
+      shouldFire: (ruleId) => !this.foregroundBusy && this.proactive.canSuggest() && ![...this.proposals.values()].some((proposal) => proposal.ruleId === ruleId && !proposal.archived && ["pending", "running", "snoozed", "failed"].includes(proposal.state)),
     });
     if (saved) this.scheduler.restore(saved.scheduler);
     this.backend = options.backend ?? new PiSdkBackend(options.config);
+    this.proactive = new ProactiveCoordinator({
+      config: this.config.proactive, events: this.events, now: this.clock, saved: saved?.proactive,
+      run: (request) => this.runWithUsage(request, request.agentRole as "context-analyst" | "notification-analyst" | "proactive-parent"),
+      canSuggest: () => !this.paused && !this.foregroundBusy && ![...this.proposals.values()].some((proposal) => proposal.ruleId === "context-insight" && !proposal.archived && ["pending", "running", "snoozed", "failed"].includes(proposal.state)),
+      recentSuggestions: () => [...this.proposals.values()].slice(-10).map(({ title, summary, state }) => ({ title, summary, state })),
+    });
     this.events.subscribe((event) => this.record(event));
   }
 
@@ -66,9 +85,11 @@ export class AgentCore {
     if (!Number.isFinite(now.getTime())) throw new Error("无效的 tick 时间");
     if (!this.config.scheduler.enabled || this.paused) return [];
     if (idleForMs !== undefined && (!Number.isFinite(idleForMs) || idleForMs < 0)) throw new Error("idleForMs 必须是非负数字");
+    this.proactive.tick(this.started && !this.foregroundBusy && this.backend.status?.().configured !== false);
     const restored: AgentEvent[] = [];
     for (const proposal of this.proposals.values()) {
-      if (proposal.state !== "snoozed" || !proposal.snoozedUntil || Date.parse(proposal.snoozedUntil) > now.getTime()) continue;
+      if (proposal.archived || proposal.state !== "snoozed" || !proposal.snoozedUntil || Date.parse(proposal.snoozedUntil) > now.getTime()) continue;
+      if (this.foregroundBusy || !this.proactive.canSuggest(now.getTime())) continue;
       proposal.state = "pending";
       delete proposal.snoozedUntil;
       restored.push(this.events.emit({
@@ -98,12 +119,14 @@ export class AgentCore {
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
     this.started = false;
+    void this.proactive.interrupt();
     this.scheduler.stop();
     this.backend.abort?.();
   }
 
   setPaused(paused: boolean): void {
     this.paused = paused;
+    if (paused) void this.proactive.interrupt();
     this.persist();
     this.events.emit({ kind: "scheduler.status", source: "scheduler", payload: { running: this.started && this.config.scheduler.enabled && !paused, paused } });
     if (!paused) this.tick();
@@ -112,35 +135,116 @@ export class AgentCore {
   addRule(rule: TriggerRule): void { this.scheduler.addRule(rule); this.persist(); }
   removeRule(ruleId: string): void { this.scheduler.removeRule(ruleId); this.persist(); }
 
-  status(): Record<string, unknown> {
+  registerContextSources(sources: unknown): void { this.proactive.registerSources(sources); }
+  receiveContext(result: ContextResult): void { this.proactive.receive(result); }
+  async settleBackground(): Promise<void> { await this.proactive.settle(); }
+
+  status(includeConversationMessages = true): Record<string, unknown> {
     return {
       paused: this.paused,
       schedulerEnabled: this.config.scheduler.enabled,
-      model: this.backend.status?.() ?? { configured: true, available: null, model: this.config.model.model, endpoint: this.config.model.endpoint ?? "", message: "自定义模型后端" },
+      proactive: this.proactive.status(),
+      model: this.backend.status?.() ?? { configured: true, available: null, model: "unknown", endpoint: "", provider: "", reasoningEffort: "unknown", configDirectory: "", message: "自定义模型后端" },
       rules: this.scheduler.listRules(),
       proposals: [...this.proposals.values()].map((proposal) => ({ ...proposal })),
+      conversations: this.conversationSnapshots(includeConversationMessages),
       history: structuredClone(this.history),
+      usageRecords: structuredClone(retainedUsage(this.usageRecords, this.clock())),
     };
   }
 
-  async prompt(requestId: string, prompt: string): Promise<void> {
+  async prompt(requestId: string, prompt: string, attachments?: unknown, allowForeground = false, conversationId = "default"): Promise<void> {
     if (typeof requestId !== "string" || !requestId.trim() || requestId.length > 256) throw new Error("requestId 必须是非空字符串且不超过 256 字符");
     if (typeof prompt !== "string" || !prompt.trim() || prompt.length > 50_000) throw new Error("prompt 必须为非空文本且不超过 50000 字符");
     if (this.history.some((event) => event.kind === "agent.response" && event.payload.requestId === requestId)) throw new Error("此请求已完成，请使用新的 requestId");
-    this.events.emit({ kind: "agent.request", source: "agent", payload: { requestId, prompt } });
+    const images = parseAttachments(attachments);
+    if (typeof allowForeground !== "boolean") throw new Error("allowForeground 必须为布尔值");
+    if (typeof conversationId !== "string" || !conversationId.trim() || conversationId.length > 256) throw new Error("conversationId 无效");
+    if (this.foregroundBusy) throw new Error("模型正在处理另一条请求，请稍后重试");
+    if (this.proposals.has(conversationId)) throw new Error("会话编号已被建议占用");
+    let session = this.conversations.get(conversationId);
+    if (session?.archived) throw new Error("请先恢复已归档的会话");
+    if (session?.messages.some(message => message.id === requestId)) throw new Error("请求编号已使用");
+    const appName = images.map(image => image.context?.appName).find(value => typeof value === "string");
+    if (!session) {
+      session = { id: conversationId, title: prompt.slice(0, 100), ...(typeof appName === "string" ? { appName: appName.slice(0, 200) } : {}),
+        createdAt: this.clock().toISOString(), updatedAt: this.clock().toISOString(), state: "running", archived: false, messages: [] };
+      this.conversations.set(conversationId, session);
+    } else if (!session.appName && typeof appName === "string") session.appName = appName.slice(0, 200);
+    const context = session.messages.flatMap(message => message.response === undefined ? [] : [
+      { role: "user", content: message.prompt }, { role: "assistant", content: message.response },
+    ]).slice(-40);
+    const turn = { id: requestId, prompt } as ConversationSession["messages"][number];
+    session.messages.push(turn);
+    session.state = "running";
+    session.updatedAt = this.clock().toISOString();
+    this.publishConversation(session.id);
+    this.events.emit({ kind: "agent.request", source: "agent", payload: { requestId, conversationId, prompt, ...(images.length ? { screenshotCount: images.length } : {}) } });
     try {
-      const response = await this.backend.run({ prompt });
-      this.events.emit({ kind: "agent.response", source: "agent", payload: { requestId, text: response.text, model: response.model } });
+      const response = await this.runWithUsage({ prompt, attachments: images, allowForeground, context: { conversation: context } }, "prompt");
+      turn.response = response.text;
+      session.state = "completed";
+      this.events.emit({ kind: "agent.response", source: "agent", payload: { requestId, conversationId, text: response.text, model: response.model } });
     } catch (error) {
-      this.events.emit({ kind: "agent.error", source: "agent", payload: { requestId, message: error instanceof Error ? error.message : String(error) } });
+      turn.error = error instanceof Error ? error.message : String(error);
+      session.state = "failed";
+      this.events.emit({ kind: "agent.error", source: "agent", payload: { requestId, conversationId, message: turn.error } });
+    } finally {
+      session.updatedAt = this.clock().toISOString();
+      this.publishConversation(session.id);
     }
+  }
+
+  manageConversation(id: string, action: string): void {
+    if (!["archive", "unarchive", "delete"].includes(action)) throw new Error("不支持的会话操作");
+    const session = this.conversations.get(id);
+    const proposal = this.proposals.get(id);
+    const item = session ?? proposal;
+    if (!item) throw new Error("找不到会话");
+    if (item.state === "running") throw new Error("请先停止正在执行的会话");
+    const previous = structuredClone(item);
+    const history = this.history;
+    if (action === "delete") {
+      this.conversations.delete(id);
+      this.proposals.delete(id);
+      this.history = this.history.filter(event => event.payload.conversationId !== id && event.payload.suggestionId !== id);
+    } else item.archived = action === "archive";
+    try { this.publishConversation(id, action); }
+    catch (error) {
+      if (session) this.conversations.set(id, previous as ConversationSession);
+      else this.proposals.set(id, previous as Proposal);
+      this.history = history;
+      throw error;
+    }
+  }
+
+  private conversationSnapshots(includeMessages: boolean): Record<string, unknown>[] {
+    return [...this.conversations.values()].map(session => {
+      const { messages, ...summary } = session;
+      return includeMessages ? structuredClone(session) : summary;
+    });
+  }
+
+  readConversation(id: string, readId: string): void {
+    if (typeof readId !== "string" || !readId || readId.length > 256) throw new Error("readId 无效");
+    const session = this.conversations.get(id);
+    if (!session) throw new Error("找不到会话");
+    this.events.emit({ kind: "conversation.messages", source: "agent", payload: {
+      conversationId: id, readId, conversation: structuredClone(session),
+    } });
+  }
+
+  private publishConversation(id: string, action?: string): void {
+    this.persist();
+    this.events.emit({ kind: "conversation.updated", source: "agent", payload: { conversationId: id, ...(action ? { action } : {}),
+      conversations: this.conversationSnapshots(false), proposals: structuredClone([...this.proposals.values()]) } });
   }
 
   async decide(suggestionId: string, decision: ProposalDecision, snoozeMinutes = 15): Promise<void> {
     if (!["execute", "later", "ignore"].includes(decision)) throw new Error("decision 必须是 execute、later 或 ignore");
     const proposal = this.proposals.get(suggestionId);
     if (!proposal) throw new Error("找不到这条主动建议");
-    if (["completed", "ignored", "running"].includes(proposal.state)) throw new Error("这条建议已处理或正在执行，不能重复处理");
+    if (proposal.archived || ["completed", "ignored", "running"].includes(proposal.state)) throw new Error("这条建议已处理或正在执行，不能重复处理");
     if (decision === "later") {
       if (!Number.isFinite(snoozeMinutes) || snoozeMinutes < 1 || snoozeMinutes > 1440) throw new Error("snoozeMinutes 必须位于 1 到 1440 之间");
       proposal.state = "snoozed";
@@ -158,7 +262,7 @@ export class AgentCore {
     delete proposal.text;
     this.update(proposal, decision);
     try {
-      const response = await this.backend.run({ prompt: `用户批准了以下建议，请生成一份可审阅的草稿。只使用已给出的信息。\n建议：${proposal.title}\n说明：${proposal.summary}`, context: proposal.context });
+      const response = await this.runWithUsage({ prompt: `用户批准了以下建议，请生成一份可审阅的草稿。只使用已给出的信息。\n建议：${proposal.title}\n说明：${proposal.summary}`, context: proposal.context }, "proposal");
       proposal.state = "completed";
       proposal.text = response.text;
       this.update(proposal, decision);
@@ -170,24 +274,65 @@ export class AgentCore {
     }
   }
 
+  private async runWithUsage(request: PiRequest, source: UsageRecord["source"]): Promise<PiResponse> {
+    const foreground = source === "prompt" || source === "proposal";
+    if (foreground && this.foregroundBusy) throw new Error("模型正在处理另一条请求，请稍后重试");
+    if (foreground) this.foregroundBusy = true;
+    let summary: Partial<PiRunUsage> | undefined;
+    let outcome: UsageRecord["outcome"] = "failed";
+    let model = this.backend.status?.().model ?? "unknown";
+    try {
+      if (foreground) await this.proactive.interrupt();
+      this.events.emit({ kind: "agent.activity", source: "agent", payload: { category: "execution", phase: "started", source } });
+      const response = await this.backend.run({ ...request, onUsage: (value) => { summary = value; },
+        onActivity: (activity) => this.events.emit({ kind: "agent.activity", source: "agent", payload: { ...activity, source } }),
+      });
+      summary ??= response;
+      model = response.model ?? model;
+      outcome = "completed";
+      return response;
+    } finally {
+      if (foreground) this.foregroundBusy = false;
+      this.events.emit({ kind: "agent.activity", source: "agent", payload: { category: "execution", phase: outcome, source } });
+      this.events.emit({ kind: "agent.usage", source: "agent", occurredAt: this.clock(), payload: {
+        source, model: summary?.model ?? model, outcome, ...(summary?.usage ? { usage: summary.usage } : {}),
+        reasoningEffort: summary?.reasoningEffort ?? "unknown", toolCalls: summary?.toolCalls ?? [],
+      } });
+    }
+  }
+
   private update(proposal: Proposal, decision: ProposalDecision): void {
     this.events.emit({ kind: "proposal.updated", source: "agent", payload: { suggestionId: proposal.id, decision, state: proposal.state, ...(proposal.text ? { text: proposal.text } : {}), ...(proposal.snoozedUntil ? { snoozedUntil: proposal.snoozedUntil } : {}) } });
   }
 
   private record(event: AgentEvent): void {
     if (event.kind === "agent.status" || event.kind === "scheduler.status") return;
+    if (event.kind === "conversation.updated" || event.kind === "conversation.messages") return;
+    if (event.kind === "context.request") {
+      this.events.emit({ kind: "agent.activity", source: "agent", payload: { category: "context", phase: "started", source: "context" } });
+      return;
+    }
+    if (event.kind === "context.cancel") return;
+    if (event.kind === "proactive.status") { this.persist(); return; }
     if (event.kind === "proactive.suggestion") {
+      this.proactive.noteSuggestion(Date.parse(event.occurredAt));
       const id = typeof event.payload.suggestionId === "string" ? event.payload.suggestionId : event.id;
       if (!this.proposals.has(id)) {
         const proposal: Proposal = {
           id, ruleId: String(event.payload.ruleId), title: String(event.payload.title), summary: String(event.payload.message),
-          reason: `由${event.payload.trigger === "time" ? "本地时间" : event.payload.trigger === "idle" ? "设备闲置状态" : "应用事件"}触发`,
+          reason: typeof event.payload.reason === "string" ? event.payload.reason : `由${event.payload.trigger === "time" ? "本地时间" : event.payload.trigger === "idle" ? "设备闲置状态" : "应用事件"}触发`,
           createdAt: event.occurredAt, state: "pending", context: event.payload.context as Record<string, unknown>,
         };
         this.proposals.set(id, proposal);
       }
       const proposal = this.proposals.get(id)!;
       Object.assign(event.payload, { suggestionId: id, summary: proposal.summary, reason: proposal.reason, createdAt: proposal.createdAt, state: proposal.state });
+    }
+    if (event.kind === "agent.usage") {
+      this.usageRecords.push({ id: event.id, occurredAt: event.occurredAt, ...event.payload } as unknown as UsageRecord);
+      this.usageRecords = retainedUsage(this.usageRecords, this.clock());
+      this.persist();
+      return;
     }
     this.history.push(structuredClone(event));
     this.history = this.history.slice(-200);
@@ -197,6 +342,6 @@ export class AgentCore {
   }
 
   private persist(): void {
-    this.store.save({ version: 1, paused: this.paused, proposals: [...this.proposals.values()], history: this.history, scheduler: this.scheduler.snapshot(), rules: this.scheduler.listRules() }, this.config.dataDir);
+    this.store.save({ version: 1, paused: this.paused, proposals: [...this.proposals.values()], conversations: [...this.conversations.values()], history: this.history, usageRecords: retainedUsage(this.usageRecords, this.clock()), scheduler: this.scheduler.snapshot(), rules: this.scheduler.listRules(), proactive: this.proactive.snapshot() }, this.config.dataDir);
   }
 }
