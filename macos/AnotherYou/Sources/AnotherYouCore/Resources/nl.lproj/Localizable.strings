@@ -296,3 +296,12 @@
 "需允许辅助功能访问；通知仅限当前可读取的内容，可能遗漏已消失的通知。" = "Toegankelijkheidstoegang vereist. Alleen nu leesbare meldingen worden meegenomen; verdwenen meldingen kunnen ontbreken.";
 "需要辅助功能权限" = "Toegankelijkheidstoestemming vereist";
 "高" = "Hoog";
+"导出会话" = "Gesprek exporteren";
+"导出用量" = "Gebruik exporteren";
+"导出失败" = "Exporteren mislukt";
+"返回会话看板" = "Terug naar het gesprekkenbord";
+"创建分支" = "Vertakking maken";
+"分支会话" = "Vertakt gesprek";
+"查看来源会话" = "Oorspronkelijk gesprek bekijken";
+"从此处分支" = "Vanaf hier vertakken";
+"重试" = "Opnieuw proberen";

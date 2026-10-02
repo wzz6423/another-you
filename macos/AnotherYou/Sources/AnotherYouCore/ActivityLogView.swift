@@ -3,35 +3,54 @@ import SwiftUI
 @MainActor
 struct ActivityLogView: View {
     @Environment(\.locale) private var interfaceLocale
-    @ObservedObject var store: AssistantStore
+    private let store: AssistantStore
+    @State private var history: [AgentEvent]
+    @State private var period: UsagePeriod = .day
     @State private var category: ActivityCategory = .all
     @State private var grouped = false
-    private var events: [AgentEvent] {
-        store.activityHistory.filter { category == .all || $0.activityCategory == category }
+
+    init(store: AssistantStore) {
+        self.store = store
+        _history = State(initialValue: store.history)
     }
 
     var body: some View {
+        TimelineView(.periodic(from: .now, by: 60)) { _ in
+            activityLog(ActivityHistory(events: history, period: period, category: category, now: Date()))
+        }
+        .onReceive(store.$history) { next in
+            if history != next { history = next }
+        }
+    }
+
+    private func activityLog(_ snapshot: ActivityHistory) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 HStack {
                     Text(AppLocalization.text("活动记录")).font(.title2.bold())
                     Spacer()
+                    Picker(AppLocalization.text("时间范围"), selection: $period) {
+                        ForEach(UsagePeriod.allCases) { Text($0.title(locale: interfaceLocale)).tag($0) }
+                    }.pickerStyle(.segmented).frame(maxWidth: 260)
+                }
+                HStack {
                     Toggle(AppLocalization.text("按类型分组"), isOn: $grouped).toggleStyle(.checkbox).font(.caption)
+                    Spacer()
                     Picker(AppLocalization.text("筛选"), selection: $category) {
                         ForEach(ActivityCategory.allCases) { Text($0.title(locale: interfaceLocale)).tag($0) }
                     }.frame(width: 190)
                 }
-                if events.isEmpty { Text(AppLocalization.text("还没有活动记录。")).foregroundStyle(.secondary).font(.callout) }
+                if snapshot.events.isEmpty { Text(AppLocalization.text("还没有活动记录。")).foregroundStyle(.secondary).font(.callout) }
                 LazyVStack(alignment: .leading, spacing: 0) {
                     if grouped {
                         ForEach(ActivityCategory.allCases.filter { $0 != .all }) { category in
-                            let rows = events.filter { $0.activityCategory == category }
+                            let rows = snapshot.groups[category] ?? []
                             if !rows.isEmpty {
                                 Text(category.title(locale: interfaceLocale)).font(.subheadline.bold()).padding(.vertical, 12)
                                 ForEach(rows) { row($0) }
                             }
                         }
-                    } else { ForEach(events) { row($0) } }
+                    } else { ForEach(snapshot.events) { row($0) } }
                 }
             }.padding(30).frame(maxWidth: 980).frame(maxWidth: .infinity, alignment: .topLeading)
         }.background(Color(nsColor: .windowBackgroundColor))

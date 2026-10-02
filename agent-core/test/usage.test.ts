@@ -8,7 +8,7 @@ import { AgentCore, createDefaultConfig, retainedUsage, type PiAgentBackend, typ
 const usage = { inputTokens: 10, outputTokens: 20, cacheReadTokens: 3, cacheWriteTokens: 4, totalTokens: 37 };
 const source = { repository: "test", ref: "test", commit: "test" };
 
-test("用量独立于历史截断持久化，精确保留30天并记录两轮上下文", async () => {
+test("用量与活动历史独立持久化，精确保留30天并记录两轮上下文", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "another-you-usage-"));
   try {
     const now = new Date("2026-10-01T12:00:00Z");
@@ -25,7 +25,7 @@ test("用量独立于历史截断持久化，精确保留30天并记录两轮上
     const records = restored.status().usageRecords as UsageRecord[];
     assert.equal(records.length, 105);
     assert.equal(records.reduce((sum, record) => sum + record.usage!.totalTokens, 0), 3885);
-    assert.equal((restored.status().history as unknown[]).length, 200);
+    assert.equal((restored.status().history as unknown[]).length, 420);
     assert.equal(retainedUsage(records, new Date(now.getTime() + 30 * 86400_000)).length, 105);
     assert.equal(retainedUsage(records, new Date(now.getTime() + 30 * 86400_000 + 1)).length, 0);
   } finally { await rm(dataDir, { recursive: true, force: true }); }
@@ -63,9 +63,11 @@ test("建议执行计入用量且隔离主会话上下文", async () => {
   try {
     const contexts: unknown[] = [];
     const backend: PiAgentBackend = { source, async run(request) { contexts.push(request.context); return { text: "draft", usage }; } };
-    const core = new AgentCore({ config: createDefaultConfig(dataDir), backend });
+    const core = new AgentCore({ config: createDefaultConfig(dataDir), backend, rules: [
+      { id: "usage-fixture", type: "event", eventName: "usage-test", title: "Usage fixture", message: "Draft a test proposal" },
+    ] });
     await core.prompt("chat", "private chat");
-    const [event] = core.signal({ type: "event", name: "app-launched" });
+    const [event] = core.signal({ type: "event", name: "usage-test" });
     await core.decide(String(event!.payload.suggestionId), "execute");
     const records = core.status().usageRecords as UsageRecord[];
     assert.deepEqual(records.map((record) => record.source), ["prompt", "proposal"]);

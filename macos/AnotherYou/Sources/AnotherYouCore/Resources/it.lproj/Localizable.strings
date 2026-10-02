@@ -296,3 +296,12 @@
 "需允许辅助功能访问；通知仅限当前可读取的内容，可能遗漏已消失的通知。" = "Serve l’accesso di accessibilità. Sono incluse solo le notifiche ora leggibili; quelle scomparse possono mancare.";
 "需要辅助功能权限" = "Permesso di accessibilità necessario";
 "高" = "Alto";
+"导出会话" = "Esporta conversazione";
+"导出用量" = "Esporta utilizzo";
+"导出失败" = "Esportazione non riuscita";
+"返回会话看板" = "Torna alla bacheca delle conversazioni";
+"创建分支" = "Crea diramazione";
+"分支会话" = "Conversazione derivata";
+"查看来源会话" = "Mostra conversazione originale";
+"从此处分支" = "Crea diramazione da qui";
+"重试" = "Riprova";

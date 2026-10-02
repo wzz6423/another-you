@@ -18,7 +18,7 @@ node --experimental-strip-types agent-core/src/cli.ts --stdio \
 | `--stdio` | Required. Select JSON Lines mode. |
 | `--config PATH` | Optional configuration path; defaults to the platform data directory's `config.json`. |
 
-The CLI restores state, starts enabled scheduling, checks the current time, emits the `app-launched` signal, and publishes `agent.status`. Startup suggestions depend on pause state, existing proposals, and cooldowns. Model availability is not tested at startup.
+The CLI restores state, starts enabled scheduling, checks the current time, emits the `app-launched` signal, and publishes `agent.status`. There is no built-in welcome conversation; custom launch rules still receive this signal. Suggestions depend on pause state, existing proposals, and cooldowns. Model availability is not tested at startup.
 
 Send `{"op":"shutdown"}` to stop. EOF, SIGINT, and SIGTERM also stop scheduling and abort an active model request. The process waits for the active task to finish its cleanup. Fatal startup errors go to stderr and exit with code 1; command errors emit `agent.error` and normally leave the process running.
 
@@ -70,6 +70,10 @@ Configuration changes, login, and refresh are mutually exclusive with each other
 
 `agent.status.payload.conversations` contains `id`, `title`, optional `appName`, `createdAt`, `updatedAt`, `state`, and `archived`; messages are returned by the on-demand read protocol below. Restart persistence respects `privacy.storePrompts` / `privacy.storeResponses`; screenshot binaries are not persisted. `agent.activity` contains only `category` (`thinking`, `execution`, `command`, `context`), `phase` (`started`, `completed`, `failed`), optional `toolName`, and `source`. It does not transmit thinking text or command arguments.
 
+`conversationFork` requires a source `conversationId` and a distinct `requestId`, with an optional `messageId`. It copies the full conversation, or the prefix through the selected turn, retaining message IDs. The new independent session records `forkedFrom: { conversationId, messageId }`; the source stays unchanged and no model request or extra usage is recorded. Forking is rejected while a foreground request is running. The successful `conversation.updated` receipt includes `action: "fork"`, `requestId`, `sourceConversationId`, and the new `conversationId`. Clients switch only after the matching receipt and then read the complete messages. Failed persistence creates no session; errors include the source `conversationId` and `requestId`.
+
+Activity and usage events from direct requests carry their actual `conversationId` and `requestId`; proposal runs carry `suggestionId`. Historical events without these identifiers are not assigned to conversations by time.
+
 ## Input examples
 
 Each example below is a complete command line. Enter the next command when appropriate; sending shutdown immediately after a prompt cancels that request.
@@ -95,9 +99,10 @@ Copy a real `payload.suggestionId` from `proactive.suggestion` or an `id` from `
 
 | Built-in rule | Trigger | Cooldown |
 | --- | --- | --- |
-| `welcome` | Event `app-launched` | 24 hours |
 | `morning` | Local time `09:00` | 20 hours |
 | `idle` | Idle duration at least 900,000 ms (15 minutes) | 2 hours |
+
+Upgrades retire the unchanged legacy `welcome` rule. Its pending sample is removed only when the original launch event remains in history and no user decision or archive action is recorded. Modified rules, user conversations, handled suggestions, and cards without sufficient history are preserved.
 
 The default deduplication window is 300,000 ms. A rule also waits until its existing pending/running/snoozed/failed proposal is resolved. The core polls time every 30 seconds by default; it does not infer idle duration on its own. The Swift host supplies actual idle measurements every 30 seconds.
 

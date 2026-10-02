@@ -190,7 +190,7 @@ final class RenderingTests: XCTestCase {
          "proposals": .array([.object(["id": .string("proposal"), "title": .string("建议"), "state": .string("pending"),
                                         "createdAt": .string("2026-10-01T09:00:00Z")])]),
          "history": .array([.object(["id": .string("history"), "kind": .string("agent.response"), "source": .string("agent"),
-                                     "occurredAt": .string("2026-10-01T09:00:00Z"), "payload": .object(["text": .string("回复")])])]),
+                                     "occurredAt": .string(ISO8601DateFormatter().string(from: Date())), "payload": .object(["text": .string("回复")])])]),
          "usageRecords": .array([.object(["id": .string("usage"), "occurredAt": .string("2026-10-01T09:00:00Z"),
                                           "source": .string("prompt"), "model": .string("test-model"), "outcome": .string("completed"),
                                           "reasoningEffort": .string("high"), "toolCalls": .array([]),

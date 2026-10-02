@@ -129,7 +129,7 @@ public final class QuickChatController: ObservableObject {
                     }
                     .help(AppLocalization.text("连接模型")).accessibilityLabel(AppLocalization.text("连接模型"))
                 } else {
-                    Button(action: send) { Image(systemName: "arrow.up") }
+                    Button(action: send) { Image(systemName: "arrow.up").foregroundStyle(.blue) }
                         .appShortcut(.sendMessage).help(AppLocalization.text("发送"))
                         .accessibilityLabel(AppLocalization.text("发送"))
                         .disabled(updates.isInstalling || store.isLoadingConversation || (prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && desktop.attachments.isEmpty))

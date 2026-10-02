@@ -16,7 +16,7 @@ public struct UsageDashboardView: View {
 
     public var body: some View {
         TimelineView(.periodic(from: .now, by: 60)) { timeline in
-            dashboard(UsageSummary(records: records, period: period, now: timeline.date))
+            dashboard(UsageSummary(records: records, period: period, now: timeline.date), now: timeline.date)
         }
         .onReceive(store.$usageRecords) { next in
             if records != next { records = next }
@@ -24,7 +24,7 @@ public struct UsageDashboardView: View {
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: period)
     }
 
-    private func dashboard(_ summary: UsageSummary) -> some View {
+    private func dashboard(_ summary: UsageSummary, now: Date) -> some View {
         VStack(alignment: .leading, spacing: 20) {
             HStack {
                 Text(AppLocalization.text("用量概览")).font(.title3.bold())
@@ -32,6 +32,7 @@ public struct UsageDashboardView: View {
                 Picker(AppLocalization.text("时间范围"), selection: $period) {
                     ForEach(UsagePeriod.allCases) { Text($0.title(locale: interfaceLocale)).tag($0) }
                 }.pickerStyle(.segmented).frame(maxWidth: 260)
+                UsageExportButton(summary: summary, period: period, now: now)
             }
             if summary.records.isEmpty {
                 HStack(spacing: 20) {

@@ -35,6 +35,7 @@ export interface ConversationSession {
   updatedAt: string;
   state: "running" | "completed" | "failed";
   archived: boolean;
+  forkedFrom?: { conversationId: string; messageId: string };
   messages: ConversationTurn[];
 }
 export interface PersistedState {

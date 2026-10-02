@@ -52,7 +52,7 @@ The app and sidecar must be running for signals to be processed. Time rules matc
 | Process isolation | Swift and Node communicate through pipes; these processes are not an operating-system sandbox for untrusted code. |
 | Development traffic | npm installs and Git source fetches operate separately from the model network policy. |
 
-Configuration and state use local file permissions. History is bounded, but unresolved suggestions are retained. Errors from malformed state are reported rather than silently resetting it. Exact defaults, file locations, retention, and the limits of redaction are in [configuration](configuration.md).
+Configuration and state use local file permissions. Activity history is retained for 30 days by event time, without a record-count cap. The activity view combines 24h / 7d / 15d / 30d ranges with category filters and grouping, refreshing its time window every minute. Unresolved suggestions remain retained. Errors from malformed state are reported rather than silently resetting it. Exact defaults, file locations, retention, and the limits of redaction are in [configuration](configuration.md).
 
 ## Development and packaging
 
