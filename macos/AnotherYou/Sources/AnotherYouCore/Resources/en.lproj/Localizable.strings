@@ -296,3 +296,12 @@
 "需允许辅助功能访问；通知仅限当前可读取的内容，可能遗漏已消失的通知。" = "Accessibility access is required. Only currently readable notifications are included; dismissed notifications may be missed.";
 "需要辅助功能权限" = "Accessibility permission required";
 "高" = "High";
+"导出会话" = "Export conversation";
+"导出用量" = "Export usage";
+"导出失败" = "Export failed";
+"返回会话看板" = "Back to conversation board";
+"创建分支" = "Create branch";
+"分支会话" = "Branched conversation";
+"查看来源会话" = "View source conversation";
+"从此处分支" = "Branch from here";
+"重试" = "Retry";

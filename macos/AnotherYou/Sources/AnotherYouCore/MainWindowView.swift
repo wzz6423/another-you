@@ -30,7 +30,7 @@ public struct MainWindowView: View {
                 Group {
                     switch selectedItem {
                     case .today: DashboardView(store: store) { selectedItem = .conversation }
-                    case .conversation: ConversationView(store: store)
+                    case .conversation: ConversationWorkspaceView(store: store)
                     case .history: ActivityLogView(store: store)
                     }
                 }
@@ -160,7 +160,7 @@ struct ProactiveCardView: View {
             if [.pending, .failed, .snoozed].contains(card.state) {
                 HStack(spacing: 9) {
                     Button(CardAction.execute.label, systemImage: CardAction.execute.icon) { onAction(.execute) }
-                        .buttonStyle(.borderedProminent).tint(Color.anotherAccent).disabled(!modelConfigured)
+                        .buttonStyle(.borderedProminent).tint(.blue).disabled(!modelConfigured)
                     Button(CardAction.later.label) { onAction(.later) }
                     Button(CardAction.ignore.label) { onAction(.ignore) }.buttonStyle(.borderless).foregroundStyle(.secondary)
                     Spacer()
@@ -191,7 +191,7 @@ public struct SettingsView: View {
 
     private enum Page: String, CaseIterable, Identifiable {
         case general = "通用", model = "模型", suggestions = "主动建议"
-        case desktop = "电脑操作", shortcuts = "快捷键", updates = "软件更新", archived = "已归档会话"
+        case desktop = "电脑操作", shortcuts = "快捷键", updates = "软件更新"
         var id: String { rawValue }
         var icon: String {
             switch self {
@@ -201,7 +201,6 @@ public struct SettingsView: View {
             case .desktop: "desktopcomputer"
             case .shortcuts: "keyboard"
             case .updates: "arrow.down.circle"
-            case .archived: "archivebox"
             }
         }
     }
@@ -237,7 +236,6 @@ public struct SettingsView: View {
                     case .desktop: DesktopSettingsView(session: store.desktop)
                     case .shortcuts: ShortcutSettingsView()
                     case .updates: updateSettings
-                    case .archived: ConversationBoardView(store: store, archived: true)
                     }
                 }
                 .formStyle(.grouped)

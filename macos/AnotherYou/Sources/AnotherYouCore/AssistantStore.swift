@@ -18,6 +18,7 @@ public final class AssistantStore: ObservableObject {
     @Published public private(set) var cards: [ProactiveCard] = []
     @Published public private(set) var usageRecords: [UsageRecord] = []
     @Published public private(set) var history: [AgentEvent] = []
+    private var historyPrunedAt = Date.distantPast
     @Published public private(set) var conversation: [ConversationMessage] = []
     @Published public private(set) var sessions: [ConversationSession] = []
     @Published public private(set) var selectedConversationID: String?
@@ -25,6 +26,12 @@ public final class AssistantStore: ObservableObject {
     @Published public private(set) var conversationActionError: String?
     @Published public private(set) var isLoadingConversation = false
     private var conversationReadID: String?
+    private var pendingConversationFork: (requestID: String, sourceID: String)?
+    private struct ConversationDraft {
+        let text: String
+        let attachments: [ScreenAttachment]
+    }
+    private var conversationDrafts: [String: ConversationDraft] = [:]
     private var sentAttachments: [String: [ScreenAttachment]] = [:]
     @Published public private(set) var lastUpdated: Date?
     @Published public private(set) var statusMessage = "Agent 未启动"
@@ -107,6 +114,7 @@ public final class AssistantStore: ObservableObject {
             && !desktop.isCapturing && desktop.activity == nil && desktop.attachments.isEmpty
             && !isChangingPause && !isRestarting && !isShuttingDown && connection != .starting
             && inputDrafts.values.allSatisfy { $0.text.isEmpty }
+            && conversationDrafts.values.allSatisfy { $0.text.isEmpty && $0.attachments.isEmpty }
             && !hasActiveBackgroundAnalysis
             && !modelSettings.isBusy && pendingConversationActions.isEmpty && !isLoadingConversation
     }
@@ -187,9 +195,14 @@ public final class AssistantStore: ObservableObject {
     public func ask(_ prompt: String) -> Bool {
         var prompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         if prompt.isEmpty && !desktop.attachments.isEmpty { prompt = "请分析截图及应用上下文。" }
-        guard !prompt.isEmpty, isConnected, modelConfigured, !hasPendingPrompt, !updates.isInstalling, !modelSettings.isBusy, !selectedConversationArchived, !isLoadingConversation else { return false }
+        guard !prompt.isEmpty, isConnected, modelConfigured, !hasPendingPrompt, !updates.isInstalling, !modelSettings.isBusy, !selectedConversationArchived, !isLoadingConversation,
+              pendingConversationActions.isEmpty, selectedConversationID == nil || conversationActionError == nil else { return false }
+        conversationActionError = nil
         let id = UUID().uuidString
         let sessionID = selectedConversationID ?? UUID().uuidString
+        if selectedConversationID == nil {
+            conversationDrafts.removeValue(forKey: "")
+        }
         selectedConversationID = sessionID
         sentAttachments[id] = desktop.attachments
         conversation.append(ConversationMessage(id: id, prompt: prompt, attachments: desktop.attachments))
@@ -204,14 +217,17 @@ public final class AssistantStore: ObservableObject {
     }
 
     public func newConversation() {
-        guard !hasPendingPrompt else { return }
+        guard !hasPendingPrompt, pendingConversationFork == nil else { return }
+        switchConversationDraft(to: nil)
         selectedConversationID = nil
         conversation = []
+        conversationActionError = nil
         finishConversationRead()
     }
 
     public func selectConversation(_ id: String) {
-        guard !hasPendingPrompt, let session = sessions.first(where: { $0.id == id }) else { return }
+        guard !hasPendingPrompt, pendingConversationFork == nil, let session = sessions.first(where: { $0.id == id }) else { return }
+        switchConversationDraft(to: id)
         selectedConversationID = id
         conversationActionError = nil
         conversation = messagesWithAttachments(session.messages)
@@ -221,6 +237,39 @@ public final class AssistantStore: ObservableObject {
         if !send(["op": .string("conversationRead"), "conversationId": .string(id), "readId": .string(readID)]) {
             conversationActionError = statusMessage
             finishConversationRead()
+        }
+    }
+
+    private func switchConversationDraft(to id: String?) {
+        guard selectedConversationID != id else { return }
+        conversationDrafts[selectedConversationID ?? ""] = ConversationDraft(text: inputDraft(for: .conversation), attachments: desktop.attachments)
+        restoreConversationDraft(id)
+    }
+
+    private func restoreConversationDraft(_ id: String?) {
+        let saved = conversationDrafts.removeValue(forKey: id ?? "")
+        setInputDraft(saved?.text ?? "", for: .conversation)
+        desktop.replaceAttachments(saved?.attachments ?? [])
+    }
+
+    public var canForkConversation: Bool {
+        isConnected && !updates.isInstalling && !hasPendingPrompt && !isLoadingConversation
+            && pendingConversationActions.isEmpty && conversationActionError == nil
+            && selectedConversationID != nil && !conversation.isEmpty
+    }
+
+    public func forkConversation(through messageID: String? = nil) {
+        guard canForkConversation, let id = selectedConversationID,
+              messageID == nil || conversation.contains(where: { $0.id == messageID }) else { return }
+        let requestID = UUID().uuidString
+        pendingConversationFork = (requestID, id)
+        pendingConversationActions.insert(id)
+        var command: [String: JSONValue] = ["op": .string("conversationFork"), "conversationId": .string(id), "requestId": .string(requestID)]
+        if let messageID { command["messageId"] = .string(messageID) }
+        if !send(command) {
+            pendingConversationFork = nil
+            pendingConversationActions.remove(id)
+            conversationActionError = statusMessage
         }
     }
 
@@ -243,7 +292,9 @@ public final class AssistantStore: ObservableObject {
     }
 
     public func manageConversation(_ id: String, action: String) {
-        guard isConnected, !updates.isInstalling, !pendingConversationActions.contains(id) else { return }
+        guard isConnected, !updates.isInstalling, !pendingConversationActions.contains(id), pendingConversationFork == nil,
+              !sessions.contains(where: { $0.id == id && $0.state == "running" }),
+              !cards.contains(where: { $0.id == id && $0.state == .running }) else { return }
         conversationActionError = nil
         pendingConversationActions.insert(id)
         if !send(["op": .string("conversationAction"), "conversationId": .string(id), "action": .string(action)]) {
@@ -277,7 +328,13 @@ public final class AssistantStore: ObservableObject {
         setIfChanged(\.sessions, to: decoded)
         if let id = selectedConversationID {
             if let session = sessions.first(where: { $0.id == id }) { setIfChanged(\.conversation, to: messagesWithAttachments(session.messages)) }
-            else if !conversation.contains(where: \.isPending) { selectedConversationID = nil; conversation = []; finishConversationRead() }
+            else if !conversation.contains(where: \.isPending) {
+                conversationDrafts.removeValue(forKey: id)
+                selectedConversationID = nil
+                restoreConversationDraft(nil)
+                conversation = []
+                finishConversationRead()
+            }
         }
         let retained = Set(sessions.flatMap { $0.messages.map(\.id) } + conversation.map(\.id))
         sentAttachments = sentAttachments.filter { retained.contains($0.key) }
@@ -334,6 +391,7 @@ public final class AssistantStore: ObservableObject {
                 pendingActions.removeAll()
                 if !pendingConversationActions.isEmpty { conversationActionError = state.label }
                 pendingConversationActions.removeAll()
+                pendingConversationFork = nil
                 finishConversationRead()
                 isChangingPause = false
                 for index in conversation.indices where conversation[index].isPending {
@@ -343,6 +401,11 @@ public final class AssistantStore: ObservableObject {
         case .protocolError(let error):
             statusMessage = error
             if isLoadingConversation { conversationActionError = error; finishConversationRead() }
+            if let fork = pendingConversationFork {
+                pendingConversationActions.remove(fork.sourceID)
+                pendingConversationFork = nil
+                conversationActionError = error
+            }
         case .event(let event): consume(event)
         }
     }
@@ -394,12 +457,20 @@ public final class AssistantStore: ObservableObject {
         case "conversation.messages": consumeConversationMessages(payload)
         case "conversation.updated":
             consumeSessions(payload)
+            if payload["action"]?.string == "fork", let fork = pendingConversationFork,
+               payload["requestId"]?.string == fork.requestID, payload["sourceConversationId"]?.string == fork.sourceID,
+               let id = payload["conversationId"]?.string, sessions.contains(where: { $0.id == id }) {
+                pendingConversationFork = nil
+                pendingConversationActions.remove(fork.sourceID)
+                selectConversation(id)
+            }
             if let values = payload["proposals"]?.array {
                 setIfChanged(\.cards, to: values.compactMap { $0.object.flatMap { ProactiveCard(payload: $0) } }.sorted { $0.createdAt > $1.createdAt })
             }
             if let id = payload["conversationId"]?.string {
                 pendingConversationActions.remove(id)
                 if payload["action"]?.string == "delete" {
+                    conversationDrafts.removeValue(forKey: id)
                     history.removeAll { $0.payload["conversationId"]?.string == id || $0.payload["suggestionId"]?.string == id }
                 }
             }
@@ -448,6 +519,11 @@ public final class AssistantStore: ObservableObject {
                let index = conversation.firstIndex(where: { $0.id == requestID }) { conversation[index].error = error }
             if let suggestionID = payload["suggestionId"]?.string { pendingActions.remove(suggestionID) }
             if let id = payload["conversationId"]?.string, pendingConversationActions.remove(id) != nil { conversationActionError = error }
+            if let fork = pendingConversationFork, payload["requestId"]?.string == fork.requestID {
+                pendingConversationActions.remove(fork.sourceID)
+                pendingConversationFork = nil
+                conversationActionError = error
+            }
             if payload["readId"]?.string == conversationReadID, conversationReadID != nil { conversationActionError = error; finishConversationRead() }
             isChangingPause = false
             mergeHistory([event])
@@ -456,10 +532,14 @@ public final class AssistantStore: ObservableObject {
     }
 
     private func mergeHistory(_ events: [AgentEvent]) {
+        let now = Date()
         var existing = Set(history.map(\.id))
-        let additions = events.filter { existing.insert($0.id).inserted }
-        guard !additions.isEmpty else { return }
-        setIfChanged(\.history, to: Array((history + additions).sorted { $0.occurredAt > $1.occurredAt }.prefix(200)))
+        let additions = ActivityHistory.retained(events.filter { existing.insert($0.id).inserted }, now: now)
+        let needsPruning = abs(now.timeIntervalSince(historyPrunedAt)) >= 60
+        guard !additions.isEmpty || needsPruning else { return }
+        let retained = needsPruning ? ActivityHistory.retained(history, now: now) : history
+        if needsPruning { historyPrunedAt = now }
+        setIfChanged(\.history, to: (retained + additions).sorted { $0.occurredAt > $1.occurredAt })
     }
 
     private func setIfChanged<Value: Equatable>(_ keyPath: ReferenceWritableKeyPath<AssistantStore, Value>, to value: Value) {

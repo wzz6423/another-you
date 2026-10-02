@@ -18,7 +18,7 @@ node --experimental-strip-types agent-core/src/cli.ts --stdio \
 | `--stdio` | 必需，使用 JSON Lines 模式。 |
 | `--config PATH` | 可选配置路径，默认是平台数据目录下的 `config.json`。 |
 
-CLI 恢复状态、启动已启用的调度、检查当前时间、发出 `app-launched` 信号，并输出 `agent.status`。启动建议受暂停状态、已有建议和冷却限制，启动时不验证模型可用性。
+CLI 恢复状态、启动已启用的调度、检查当前时间、发出 `app-launched` 信号，并输出 `agent.status`。应用不再内置欢迎会话；用户自定义启动规则仍可接收该信号。建议受暂停状态、已有建议和冷却限制，启动时不验证模型可用性。
 
 发送 `{"op":"shutdown"}` 关闭。EOF、SIGINT 和 SIGTERM 也会停止调度并取消正在进行的模型请求，进程等待该任务完成清理。致命启动错误写入 stderr，并以状态码 1 退出；命令错误发出 `agent.error`，通常不结束进程。
 
@@ -68,7 +68,9 @@ CLI 恢复状态、启动已启用的调度、检查当前时间、发出 `app-l
 
 `prompt` 可选 `conversationId`，省略时兼容 `default` 会话，各会话隔离上下文。`conversationAction` 要求 `conversationId` 和 `action`（`archive`、`unarchive`、`delete`）；执行中拒绝归档和删除。成功事件 `conversation.updated` 含 `conversationId`、可选 `action`、`conversations` 和 `proposals`；失败事件 `agent.error` 带 `conversationId`。
 
-`agent.status.payload.conversations` 包含 `id`、`title`、可选 `appName`、`createdAt`、`updatedAt`、`state` 和 `archived`；消息通过下文的按需读取协议返回。重启恢复遵循 `privacy.storePrompts` / `privacy.storeResponses`；截图二进制不持久化。`agent.activity` 仅记录 `category`（`thinking`、`execution`、`command`、`context`）、`phase`（`started`、`completed`、`failed`）、可选 `toolName` 和 `source`，不传输思考正文或命令参数。
+`conversationFork` 要求 `conversationId`、独立 `requestId`，可选 `messageId`。省略起点时复制全部轮次，指定时复制该轮及之前的完整前缀，保留消息 ID。分支保存为新的独立会话，记录 `forkedFrom: { conversationId, messageId }`，不修改源会话、不调用模型或重复计入用量；执行中拒绝分支。成功回执为 `conversation.updated`，含 `action: "fork"`、`requestId`、`sourceConversationId` 及新会话的 `conversationId`。客户端仅在匹配成功回执后切换并按需读取完整消息；保存失败不创建会话，错误携带源 `conversationId` 和 `requestId`。
+
+`agent.status.payload.conversations` 包含 `id`、`title`、可选 `appName`、`createdAt`、`updatedAt`、`state` 和 `archived`；消息通过下文的按需读取协议返回。重启恢复遵循 `privacy.storePrompts` / `privacy.storeResponses`；截图二进制不持久化。`agent.activity` 仅记录 `category`（`thinking`、`execution`、`command`、`context`）、`phase`（`started`、`completed`、`failed`）、可选 `toolName` 和 `source`，不传输思考正文或命令参数。直接请求的活动与用量事件附带实际 `conversationId` / `requestId`，建议执行附带 `suggestionId`，旧事件不按时间猜测归属。
 
 ## 输入示例
 
@@ -95,9 +97,10 @@ CLI 恢复状态、启动已启用的调度、检查当前时间、发出 `app-l
 
 | 内置规则 | 触发 | 冷却 |
 | --- | --- | --- |
-| `welcome` | 事件 `app-launched` | 24 小时 |
 | `morning` | 本地时间 `09:00` | 20 小时 |
 | `idle` | 闲置至少 900,000 ms（15 分钟） | 2 小时 |
+
+升级时停用未修改的旧 `welcome` 规则。只有原始启动事件仍在历史中、没有用户决策或归档操作记录的待处理样例才会清理；修改过的规则、真实用户会话、已处理建议及缺少识别历史的卡片均保留。
 
 默认去重窗口为 300,000 ms。同一规则还需等待已有待处理/执行中/稍后/失败建议解决。核心默认每 30 秒检查时间，不自行推断设备闲置；Swift 宿主每 30 秒提供真实闲置测量。
 

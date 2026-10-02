@@ -296,3 +296,12 @@
 "需允许辅助功能访问；通知仅限当前可读取的内容，可能遗漏已消失的通知。" = "Bedienungshilfen-Zugriff erforderlich. Nur aktuell lesbare Mitteilungen werden erfasst; verschwundene können fehlen.";
 "需要辅助功能权限" = "Bedienungshilfen-Zugriff erforderlich";
 "高" = "Hoch";
+"导出会话" = "Gespräch exportieren";
+"导出用量" = "Nutzung exportieren";
+"导出失败" = "Export fehlgeschlagen";
+"返回会话看板" = "Zurück zur Gesprächsübersicht";
+"创建分支" = "Abzweigung erstellen";
+"分支会话" = "Abgezweigtes Gespräch";
+"查看来源会话" = "Ursprüngliches Gespräch ansehen";
+"从此处分支" = "Ab hier abzweigen";
+"重试" = "Erneut versuchen";

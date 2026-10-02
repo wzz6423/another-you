@@ -169,11 +169,18 @@ public enum ConnectionState: Equatable, Sendable {
     }
 }
 
+public struct ConversationForkOrigin: Equatable, Sendable {
+    public let conversationID: String
+    public let messageID: String
+}
+
 public struct ConversationSession: Identifiable, Equatable, Sendable {
     public let id: String
     public let title: String
     public let appName: String?
     public let updatedAt: Date
+    public let createdAt: Date
+    public let forkedFrom: ConversationForkOrigin?
     public let state: String
     public let archived: Bool
     public var messages: [ConversationMessage]
@@ -184,6 +191,11 @@ public struct ConversationSession: Identifiable, Equatable, Sendable {
         self.title = title
         appName = payload["appName"]?.string
         updatedAt = AgentEvent.date(from: payload["updatedAt"]?.string) ?? .distantPast
+        createdAt = AgentEvent.date(from: payload["createdAt"]?.string) ?? updatedAt
+        if let origin = payload["forkedFrom"]?.object,
+           let conversationID = origin["conversationId"]?.string, let messageID = origin["messageId"]?.string {
+            forkedFrom = ConversationForkOrigin(conversationID: conversationID, messageID: messageID)
+        } else { forkedFrom = nil }
         state = payload["state"]?.string ?? "failed"
         archived = payload["archived"]?.bool ?? false
         messages = (payload["messages"]?.array ?? []).compactMap { value in

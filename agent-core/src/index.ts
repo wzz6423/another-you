@@ -1,12 +1,14 @@
+import { randomUUID } from "node:crypto";
 import type { AgentConfig } from "./config.ts";
 import { EventBus, type AgentEvent } from "./events.ts";
 import { PiSdkBackend, type PiAgentBackend, type PiRequest, type PiResponse, type PiRunUsage } from "./pi-adapter.ts";
 import { ProactiveScheduler, type SchedulerSignal, type TriggerRule } from "./scheduler.ts";
-import { StateStore, type Proposal, type ProposalDecision, type ConversationSession } from "./state.ts";
+import { StateStore, type PersistedState, type Proposal, type ProposalDecision, type ConversationSession } from "./state.ts";
 import { ProactiveCoordinator, type ContextResult } from "./proactive.ts";
 
 import { retainedUsage, type UsageRecord } from "./usage.ts";
 import { parseAttachments } from "./desktop-bridge.ts";
+import { retainedHistory } from "./activity-history.ts";
 
 export * from "./usage.ts";
 export * from "./config.ts";
@@ -18,10 +20,40 @@ export * from "./proactive.ts";
 export * from "./proactive-config.ts";
 
 export const DEFAULT_RULES: TriggerRule[] = [
-  { id: "welcome", type: "event", eventName: "app-launched", title: "给今天留一个起点", message: "可以一起梳理今天的优先事项。当前未连接日历或任务来源，你可以先告诉我最想推进的一件事。", cooldownMs: 24 * 60 * 60_000 },
   { id: "morning", type: "time", at: "09:00", title: "早间整理", message: "现在是早上九点。要不要生成一个今日计划的空白草稿，再由你补充真实安排？", cooldownMs: 20 * 60 * 60_000 },
   { id: "idle", type: "idle", minIdleMs: 15 * 60_000, title: "留一个继续的入口", message: "设备已闲置一段时间。可以生成一个简短的恢复工作清单；我还不知道你刚才在做什么。", cooldownMs: 2 * 60 * 60_000 },
 ];
+
+const LEGACY_WELCOME_RULE: TriggerRule = {
+  id: "welcome", type: "event", eventName: "app-launched", title: "给今天留一个起点",
+  message: "可以一起梳理今天的优先事项。当前未连接日历或任务来源，你可以先告诉我最想推进的一件事。", cooldownMs: 24 * 60 * 60_000,
+};
+
+function retireWelcomeSample(saved: PersistedState | undefined): boolean {
+  if (!saved) return false;
+  const hasLegacyRule = saved.rules?.some(rule => {
+    const { enabled, ...definition } = rule;
+    return enabled !== false && Object.keys(definition).length === Object.keys(LEGACY_WELCOME_RULE).length
+      && Object.entries(LEGACY_WELCOME_RULE).every(([key, value]) => definition[key as keyof typeof definition] === value);
+  });
+  if (!hasLegacyRule) return false;
+  saved.rules = saved.rules!.filter(rule => rule.id !== LEGACY_WELCOME_RULE.id);
+  // 原始触发仍在历史中且没有后续决策，才能确认这只是未经用户操作的旧样例。
+  const samples = new Set(saved.proposals.filter(proposal =>
+    proposal.ruleId === LEGACY_WELCOME_RULE.id && proposal.title === LEGACY_WELCOME_RULE.title
+    && proposal.summary === LEGACY_WELCOME_RULE.message && proposal.reason === "由应用事件触发"
+    && proposal.state === "pending" && proposal.text === undefined && proposal.snoozedUntil === undefined
+    && proposal.archived === undefined && Object.keys(proposal.context ?? {}).length === 0
+    && saved.history.some(event => event.id === proposal.id && event.kind === "proactive.suggestion"
+      && event.source === "scheduler" && event.occurredAt === proposal.createdAt
+      && event.payload.ruleId === LEGACY_WELCOME_RULE.id && event.payload.trigger === "event"
+      && (event.payload.signal as Record<string, unknown> | undefined)?.name === "app-launched")
+    && !saved.history.some(event => event.kind === "proposal.updated" && event.payload.suggestionId === proposal.id)
+  ).map(proposal => proposal.id));
+  saved.proposals = saved.proposals.filter(proposal => !samples.has(proposal.id));
+  saved.history = saved.history.filter(event => !samples.has(event.id));
+  return true;
+}
 
 export interface AgentCoreOptions {
   config: AgentConfig;
@@ -52,8 +84,9 @@ export class AgentCore {
     this.clock = options.now ?? (() => new Date());
     this.store = new StateStore(this.config.dataDir, this.config.privacy);
     const saved = this.store.load();
+    const retiredWelcome = options.rules === undefined && retireWelcomeSample(saved);
     this.paused = saved?.paused ?? false;
-    this.history = saved?.history ?? [];
+    this.history = retainedHistory(saved?.history ?? [], this.clock());
     this.usageRecords = retainedUsage(saved?.usageRecords ?? [], this.clock());
     for (const session of saved?.conversations ?? []) this.conversations.set(session.id, session);
     for (const proposal of saved?.proposals ?? []) this.proposals.set(proposal.id, proposal);
@@ -72,6 +105,7 @@ export class AgentCore {
       recentSuggestions: () => [...this.proposals.values()].slice(-10).map(({ title, summary, state }) => ({ title, summary, state })),
     });
     this.events.subscribe((event) => this.record(event));
+    if (retiredWelcome) this.persist();
   }
 
   signal(signal: SchedulerSignal, now?: Date): AgentEvent[] {
@@ -148,7 +182,7 @@ export class AgentCore {
       rules: this.scheduler.listRules(),
       proposals: [...this.proposals.values()].map((proposal) => ({ ...proposal })),
       conversations: this.conversationSnapshots(includeConversationMessages),
-      history: structuredClone(this.history),
+      history: structuredClone(retainedHistory(this.history, this.clock())),
       usageRecords: structuredClone(retainedUsage(this.usageRecords, this.clock())),
     };
   }
@@ -181,7 +215,7 @@ export class AgentCore {
     this.publishConversation(session.id);
     this.events.emit({ kind: "agent.request", source: "agent", payload: { requestId, conversationId, prompt, ...(images.length ? { screenshotCount: images.length } : {}) } });
     try {
-      const response = await this.runWithUsage({ prompt, attachments: images, allowForeground, context: { conversation: context } }, "prompt");
+      const response = await this.runWithUsage({ prompt, attachments: images, allowForeground, context: { conversation: context } }, "prompt", { requestId, conversationId });
       turn.response = response.text;
       session.state = "completed";
       this.events.emit({ kind: "agent.response", source: "agent", payload: { requestId, conversationId, text: response.text, model: response.model } });
@@ -218,6 +252,27 @@ export class AgentCore {
     }
   }
 
+  forkConversation(id: string, requestId: string, messageId?: string): void {
+    if (typeof requestId !== "string" || !requestId.trim() || requestId.length > 256) throw new Error("requestId 无效");
+    if (messageId !== undefined && (typeof messageId !== "string" || !messageId.trim())) throw new Error("messageId 无效");
+    const source = this.conversations.get(id);
+    if (!source) throw new Error("找不到会话");
+    if (this.foregroundBusy || source.state === "running") throw new Error("请先停止正在执行的会话");
+    const index = messageId === undefined ? source.messages.length - 1 : source.messages.findIndex(message => message.id === messageId);
+    if (index < 0) throw new Error("找不到分支起点");
+    const messages = structuredClone(source.messages.slice(0, index + 1));
+    if (messages.some(message => message.response === undefined && message.error === undefined)) throw new Error("请先停止正在执行的会话");
+    const fork: ConversationSession = {
+      id: randomUUID(), title: source.title, ...(source.appName ? { appName: source.appName } : {}),
+      createdAt: this.clock().toISOString(), updatedAt: this.clock().toISOString(), archived: false,
+      state: messages.at(-1)?.error === undefined ? "completed" : "failed", messages,
+      forkedFrom: { conversationId: id, messageId: messages.at(-1)!.id },
+    };
+    this.conversations.set(fork.id, fork);
+    try { this.publishConversation(fork.id, "fork", { requestId, sourceConversationId: id }); }
+    catch (error) { this.conversations.delete(fork.id); throw error; }
+  }
+
   private conversationSnapshots(includeMessages: boolean): Record<string, unknown>[] {
     return [...this.conversations.values()].map(session => {
       const { messages, ...summary } = session;
@@ -234,9 +289,9 @@ export class AgentCore {
     } });
   }
 
-  private publishConversation(id: string, action?: string): void {
+  private publishConversation(id: string, action?: string, operation: Record<string, string> = {}): void {
     this.persist();
-    this.events.emit({ kind: "conversation.updated", source: "agent", payload: { conversationId: id, ...(action ? { action } : {}),
+    this.events.emit({ kind: "conversation.updated", source: "agent", payload: { conversationId: id, ...(action ? { action } : {}), ...operation,
       conversations: this.conversationSnapshots(false), proposals: structuredClone([...this.proposals.values()]) } });
   }
 
@@ -262,7 +317,7 @@ export class AgentCore {
     delete proposal.text;
     this.update(proposal, decision);
     try {
-      const response = await this.runWithUsage({ prompt: `用户批准了以下建议，请生成一份可审阅的草稿。只使用已给出的信息。\n建议：${proposal.title}\n说明：${proposal.summary}`, context: proposal.context }, "proposal");
+      const response = await this.runWithUsage({ prompt: `用户批准了以下建议，请生成一份可审阅的草稿。只使用已给出的信息。\n建议：${proposal.title}\n说明：${proposal.summary}`, context: proposal.context }, "proposal", { suggestionId });
       proposal.state = "completed";
       proposal.text = response.text;
       this.update(proposal, decision);
@@ -274,7 +329,7 @@ export class AgentCore {
     }
   }
 
-  private async runWithUsage(request: PiRequest, source: UsageRecord["source"]): Promise<PiResponse> {
+  private async runWithUsage(request: PiRequest, source: UsageRecord["source"], correlation: Record<string, string> = {}): Promise<PiResponse> {
     const foreground = source === "prompt" || source === "proposal";
     if (foreground && this.foregroundBusy) throw new Error("模型正在处理另一条请求，请稍后重试");
     if (foreground) this.foregroundBusy = true;
@@ -283,9 +338,9 @@ export class AgentCore {
     let model = this.backend.status?.().model ?? "unknown";
     try {
       if (foreground) await this.proactive.interrupt();
-      this.events.emit({ kind: "agent.activity", source: "agent", payload: { category: "execution", phase: "started", source } });
+      this.events.emit({ kind: "agent.activity", source: "agent", payload: { category: "execution", phase: "started", source, ...correlation } });
       const response = await this.backend.run({ ...request, onUsage: (value) => { summary = value; },
-        onActivity: (activity) => this.events.emit({ kind: "agent.activity", source: "agent", payload: { ...activity, source } }),
+        onActivity: (activity) => this.events.emit({ kind: "agent.activity", source: "agent", payload: { ...activity, source, ...correlation } }),
       });
       summary ??= response;
       model = response.model ?? model;
@@ -293,9 +348,9 @@ export class AgentCore {
       return response;
     } finally {
       if (foreground) this.foregroundBusy = false;
-      this.events.emit({ kind: "agent.activity", source: "agent", payload: { category: "execution", phase: outcome, source } });
+      this.events.emit({ kind: "agent.activity", source: "agent", payload: { category: "execution", phase: outcome, source, ...correlation } });
       this.events.emit({ kind: "agent.usage", source: "agent", occurredAt: this.clock(), payload: {
-        source, model: summary?.model ?? model, outcome, ...(summary?.usage ? { usage: summary.usage } : {}),
+        source, model: summary?.model ?? model, outcome, ...correlation, ...(summary?.usage ? { usage: summary.usage } : {}),
         reasoningEffort: summary?.reasoningEffort ?? "unknown", toolCalls: summary?.toolCalls ?? [],
       } });
     }
@@ -335,13 +390,13 @@ export class AgentCore {
       return;
     }
     this.history.push(structuredClone(event));
-    this.history = this.history.slice(-200);
     const finished = [...this.proposals.values()].filter((proposal) => ["completed", "ignored"].includes(proposal.state));
     for (const proposal of finished.slice(0, Math.max(0, finished.length - 100))) this.proposals.delete(proposal.id);
     this.persist();
   }
 
   private persist(): void {
+    this.history = retainedHistory(this.history, this.clock());
     this.store.save({ version: 1, paused: this.paused, proposals: [...this.proposals.values()], conversations: [...this.conversations.values()], history: this.history, usageRecords: retainedUsage(this.usageRecords, this.clock()), scheduler: this.scheduler.snapshot(), rules: this.scheduler.listRules(), proactive: this.proactive.snapshot() }, this.config.dataDir);
   }
 }
