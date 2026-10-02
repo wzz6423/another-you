@@ -95,7 +95,7 @@ swift_build=("${repo_dir}/scripts/xcode-toolchain.sh" build --package-path "${re
   --scratch-path "${build_dir}/swift" -c release --arch "$build_arch")
 "${swift_build[@]}" --product AnotherYou -Xlinker -rpath -Xlinker @executable_path/../Frameworks
 bin_dir="$("${swift_build[@]}" --show-bin-path)"
-linked_sdk_version="$(xcrun vtool -show-build "${bin_dir}/AnotherYou" | awk '$1 == "sdk" { print $2; exit }')"
+linked_sdk_version="$(xcrun vtool -show-build "${bin_dir}/AnotherYou" | awk '$1 == "sdk" && !found { print $2; found = 1 }')"
 if [[ "$linked_sdk_version" != "$sdk_version" ]]; then
   echo "链接的 macOS SDK 为 ${linked_sdk_version:-未知}，预期为 ${sdk_version}；应用可能使用旧窗口兼容模式。" >&2
   exit 1

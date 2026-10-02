@@ -12,7 +12,8 @@ if [[ ! -x "$developer_dir/Toolchains/XcodeDefault.xctoolchain/usr/bin/swift" ||
 fi
 export DEVELOPER_DIR="$developer_dir"
 
-xcode_version="$(xcodebuild -version | awk '$1 == "Xcode" { print $2; exit }')"
+# 消费完整输出，避免提前关闭管道使 xcodebuild 后续写入失败。
+xcode_version="$(xcodebuild -version | awk '$1 == "Xcode" && !found { print $2; found = 1 }')"
 sdk_version="$(xcrun --sdk macosx --show-sdk-version)"
 if [[ ! "$xcode_version" =~ ^[0-9]+([.][0-9]+)*$ || ! "$sdk_version" =~ ^[0-9]+([.][0-9]+)*$ ]]; then
   echo "无法确认所选 Xcode 与 macOS SDK 版本。" >&2
