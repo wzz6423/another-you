@@ -14,7 +14,9 @@
   },
   "dependencies": {
     "@earendil-works/pi-agent-core": "0.99.2",
-    "@earendil-works/pi-ai": "0.99.2"
+    "@earendil-works/pi-ai": "0.99.2",
+    "@earendil-works/pi-coding-agent": "0.99.2",
+    "playwright-core": "1.63.0"
   },
   "devDependencies": {
     "@types/node": "22.19.19",

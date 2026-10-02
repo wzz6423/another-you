@@ -2,11 +2,11 @@
 
 [English](README.md) | **简体中文**
 
-0.1.0 开发预览的原生 SwiftUI 客户端，提供主窗口、菜单栏控制、本地模型设置与可选系统通知。目前 UI 使用中文。Agent 规则、模型请求与建议状态持久化由 Node sidecar 负责。
+0.1.0 开发预览的原生 SwiftUI 客户端，提供主窗口、菜单栏控制、Pi 模型状态与可选系统通知。目前 UI 使用中文。Agent 规则、模型请求与建议状态持久化由 Node sidecar 负责。
 
 ## 从源码运行
 
-需要 macOS 14+、Swift 6、Node.js 22.19+ 和 npm。从仓库根目录执行：
+应用支持 macOS 14+；从源码构建需要完整 Xcode 27+、macOS 27+ SDK、Node.js 22.19+ 和 npm。从仓库根目录执行：
 
 ```bash
 make deps
@@ -26,26 +26,38 @@ make update
 
 ```bash
 ANOTHER_YOU_AGENT_ROOT="$PWD/agent-core" \
-  swift run --package-path macos/AnotherYou AnotherYou
+  ./scripts/xcode-toolchain.sh run --package-path macos/AnotherYou AnotherYou
 ```
 
 直接运行可使用主界面和 sidecar，但系统通知需要 `.app` 应用包。可从菜单栏退出应用；前台源码运行也可用 `Ctrl+C` 结束。
 
-## 连接模型
+构建和测试使用 `DEVELOPER_DIR` 或 `xcode-select` 选定的完整 Xcode；仅有 Command Line Tools 或 Xcode 低于 27 时会拒绝执行。`make build SWIFT_SCRATCH_PATH=/tmp/another-you-swift` 和 `make test-swift SWIFT_SCRATCH_PATH=/tmp/another-you-swift` 可将验证产物与默认 `.build` 隔离，验证后单独清理该临时目录。
 
-1. 单独启动兼容的本机模型服务，确认它实际提供的模型名称。Ollama 可使用 `ollama list` 查看已安装模型。
-2. 打开 **设置 → 本地模型**，填写服务地址与模型名称。Ollama 常用地址为 `http://127.0.0.1:11434/v1`。
-3. 选择 **保存并重新连接**，然后提交一条提问或从建议生成草稿，验证连接。
+## 使用 Pi 模型
 
-从侧栏、菜单栏或 **⌘,** 打开的设置是独立 macOS 窗口，可以最小化、关闭，主窗口可同时操作。
+设置按通用、模型、主动建议、电脑操作、快捷键、软件更新分页。模型页只读展示 Pi 当前默认模型、提供方和思考深度；不保存另一份模型或认证配置。
 
-应用不会安装模型或启动模型服务。保存设置只校验并写入配置，实际模型请求成功才代表可用性验证。设置 UI 仅接受 `localhost`、`127.0.0.1` 和 `::1` 回环地址。
+1. 在本机 Pi 中完成认证（`/login`）或配置模型服务。本地模型同样通过 Pi 的 `models.json` 或本地模型功能配置。
+2. 在 Pi 的 `/model` 中选择模型并按 **Ctrl+S** 保存为默认；需要时在 `/thinking` 中保存默认思考深度。
+3. 在 Another You 的 **设置 → 模型** 点击 **重新读取 Pi 配置**，然后发送请求验证模型。
 
-保存时会把模型段替换为 `provider=local`、`temperature=0.2`，将隐私模式设为 `strict-local`，清空远程主机授权，并关闭 `tools.network`；内容保存偏好会保留。远程模型需要手工配置，并确保进程环境含有所指定的密钥，详见 [配置参考](../../docs/configuration.zh-CN.md)。之后通过本地模型 UI 保存，会覆盖该远程配置。
+应用读取 Pi 的 `settings.json`、`models.json` 和 `auth.json`，默认目录为 `~/.pi/agent`，遵循 `PI_CODING_AGENT_DIR`。旧 Another You 配置中的 `model` 不再生效，也不会自动写入 Pi。缺少默认模型或认证时明确提示；读取成功不等于模型请求已验证。模型请求仍通过 Pi 的原生认证与提供方适配执行。
+
+## 会话与用量
+
+快速会话显示玻璃胶囊输入框；有截图时在上方显示可移除的附件预览，位于鼠标所在屏幕水平中央、距屏幕底部 20% 处。macOS 26+ 使用原生液态玻璃，旧系统回退磨砂材质；Return 或发送快捷键提交后收起，回复在主界面会话中查看。
+
+侧边栏的 **会话** 打开独立会话页。应用运行时，**⌘⇧Space** 在其他应用中也能呼出快速会话框；**⌘Return** 发送，**Esc** 隐藏小窗口。两个入口共享已发送消息，关闭小窗口不会清空会话。快捷键注册失败时可使用菜单的快速会话入口。每个会话最近 20 轮成功对话作为自身的后续请求上下文，不混入其他会话或建议草稿。会话标题、状态与完整消息历史由 sidecar 持久化，重启恢复遵循内容保存偏好；截图二进制不持久化，也不会在后续轮次假装重传。
+
+首页以 **进行中 / 已完成** 两列展示会话和主动建议，可按截图关联的应用分组。点击会话可继续讨论，点击建议可查看并决定下一步；菜单支持归档和删除。**设置 → 已归档会话** 可查看、恢复或删除归档内容。执行中的会话需先停止，所有操作以 sidecar 回执为准。
+
+**活动记录** 按条显示思考、执行、运行命令和读取应用上下文的阶段，可按类型筛选或分组；思考日志只记录开始/结束状态，不保存模型的思考正文。
+
+首页饼图显示模型 Token 占比，支持 **24h / 7d / 15d / 30d**，并列出输入、输出、缓存、模型排行、思考深度和工具调用。统计从本版本开始，保留 30 天；失败请求已报告的用量也会计入。服务未报告用量时显示未报告，不估算。Plugin / Skill / MCP 仅在运行时确有对应调用记录时显示，当前没有内置这些连接器。
 
 ## 建议与通知
 
-建议来自应用启动、本地时间和 Mac 的真实闲置信号。客户端每 30 秒采样闲置时长，不读取屏幕、消息、日历或当前工作。规则冷却与尚未处理的建议共同限制重复打扰。
+建议来自应用启动、本地时间和 Mac 的真实闲置信号。闲置采样每 30 秒运行一次。截图与应用上下文通过会话入口及具备系统权限的采集功能获取。规则冷却与尚未处理的建议共同限制重复打扰。
 
 建议支持 **生成草稿**、**稍后** 和 **忽略**。稍后默认延迟 15 分钟；到期时，运行时需保持运行，主动调度已启用且未暂停，建议才会恢复。生成状态以 sidecar 的回执为准，失败可由用户手工重试。**暂停主动建议** 跨重启保存，不取消已经提交的模型请求。
 
@@ -85,3 +97,7 @@ make clean
 [AgentClient.swift](Sources/AnotherYouCore/AgentClient.swift) 负责进程与协议；[AssistantStore.swift](Sources/AnotherYouCore/AssistantStore.swift) 将事件转换成 UI 状态并采样闲置时长；[AgentSettings.swift](Sources/AnotherYouCore/AgentSettings.swift) 负责本地设置持久化。[MainWindowView.swift](Sources/AnotherYouCore/MainWindowView.swift) 包含视图，[main.swift](Sources/AnotherYou/main.swift) 创建窗口、设置场景和菜单栏。
 
 修改 Swift/Node 边界前，请阅读 [架构](../../docs/architecture.zh-CN.md)、[CLI 与 JSONL 协议](../../docs/cli-reference.zh-CN.md) 和 [贡献指南](../../CONTRIBUTING.zh-CN.md)。
+
+## 快捷键、截图与后台操作
+
+[快捷键、截图与后台操作](../../docs/desktop-automation.zh-CN.md)说明所有快捷键的重录、截图预览、系统权限和操作范围。

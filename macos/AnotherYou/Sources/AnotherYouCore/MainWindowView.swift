@@ -2,17 +2,23 @@ import AppKit
 import SwiftUI
 
 private enum SidebarItem: String, CaseIterable, Identifiable {
-    case today, history
+    case today, conversation, history
     var id: String { rawValue }
-    var title: String { self == .today ? "今天" : "活动记录" }
-    var icon: String { self == .today ? "sun.max" : "clock.arrow.circlepath" }
+    var title: String {
+        switch self { case .today: AppLocalization.text("今天"); case .conversation: AppLocalization.text("会话"); case .history: AppLocalization.text("活动记录") }
+    }
+    var icon: String {
+        switch self { case .today: "sun.max"; case .conversation: "bubble.left.and.bubble.right"; case .history: "clock.arrow.circlepath" }
+    }
 }
 
 @MainActor
 public struct MainWindowView: View {
-    @ObservedObject private var store: AssistantStore
+    @Environment(\.locale) private var interfaceLocale
+    private let store: AssistantStore
     @State private var selectedItem: SidebarItem = .today
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     public init(store: AssistantStore) { self.store = store }
 
@@ -20,11 +26,19 @@ public struct MainWindowView: View {
         NavigationSplitView {
             SidebarView(selection: $selectedItem) { openWindow(id: "settings") }
         } detail: {
-            switch selectedItem {
-            case .today: DashboardView(store: store) { openWindow(id: "settings") }
-            case .history: HistoryView(store: store)
+            ZStack {
+                Group {
+                    switch selectedItem {
+                    case .today: DashboardView(store: store) { selectedItem = .conversation }
+                    case .conversation: ConversationView(store: store)
+                    case .history: ActivityLogView(store: store)
+                    }
+                }
+                .id(selectedItem)
+                .transition(.opacity)
             }
         }
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: selectedItem)
         .navigationSplitViewStyle(.balanced)
         .frame(minWidth: 780, minHeight: 580)
         .task { store.connect() }
@@ -33,6 +47,7 @@ public struct MainWindowView: View {
 
 @MainActor
 private struct SidebarView: View {
+    @Environment(\.locale) private var interfaceLocale
     @Binding var selection: SidebarItem
     let onSettings: () -> Void
 
@@ -44,7 +59,7 @@ private struct SidebarView: View {
                     .foregroundStyle(Color.anotherAccent)
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Another You").font(.system(size: 15, weight: .semibold, design: .rounded))
-                    Text("把主动，留给恰好的时刻").font(.system(size: 10)).foregroundStyle(.secondary)
+                    Text(AppLocalization.text("把主动，留给恰好的时刻")).font(.system(size: 10)).foregroundStyle(.secondary)
                 }
             }
             .padding(.horizontal, 18).padding(.top, 26).padding(.bottom, 30)
@@ -64,7 +79,7 @@ private struct SidebarView: View {
             }
             .padding(.horizontal, 12)
             Spacer()
-            Button(action: onSettings) { Label("设置", systemImage: "slider.horizontal.3") }
+            Button(action: onSettings) { Label(AppLocalization.text("设置"), systemImage: "slider.horizontal.3") }
                 .buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(.secondary)
                 .padding(20)
         }
@@ -75,114 +90,24 @@ private struct SidebarView: View {
 
 @MainActor
 private struct DashboardView: View {
+    @Environment(\.locale) private var interfaceLocale
     @ObservedObject var store: AssistantStore
-    let onSettings: () -> Void
+    let onConversation: () -> Void
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 26) {
-                HeroHeader(store: store)
-                if !store.modelConfigured || !store.isConnected {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text(store.isConnected ? "连接你的本地模型" : store.connection.label)
-                            .font(.system(size: 14, weight: .semibold))
-                        if !store.isConnected {
-                            Text(store.statusMessage)
-                                .font(.system(size: 12)).foregroundStyle(.secondary).textSelection(.enabled)
-                        }
-                        HStack {
-                            Button("模型设置", action: onSettings)
-                            if !store.isConnected { Button("重新连接") { store.refresh() }.disabled(store.connection == .starting || store.isRestarting) }
-                        }
-                    }
-                    .padding(18).frame(maxWidth: .infinity, alignment: .leading)
-                    .background(.background, in: RoundedRectangle(cornerRadius: 16))
-                }
-                HStack(spacing: 12) {
-                    MetricTile(title: "等待决定", value: "\(store.pendingCount)", icon: "tray")
-                    MetricTile(title: "生成的草稿", value: "\(store.completedCount)", icon: "doc.text")
-                    MetricTile(title: "主动建议", value: store.isConnected ? (store.paused ? "已暂停" : "已开启") : "未连接", icon: "waveform.path")
-                }
-                VStack(alignment: .leading, spacing: 14) {
-                    SectionHeading(title: "值得你看一眼", subtitle: "一条建议，一个由你决定的下一步")
-                    if store.activeCards.isEmpty {
-                        Text(store.connection == .starting ? "正在读取本地建议…" : "暂时没有建议。合适的时间，助手会出现在这里。")
-                            .font(.system(size: 13)).foregroundStyle(.secondary)
-                            .padding(24).frame(maxWidth: .infinity, alignment: .leading)
-                            .background(.background, in: RoundedRectangle(cornerRadius: 18))
-                    } else {
-                        LazyVStack(spacing: 12) {
-                            ForEach(store.activeCards) { card in
-                                ProactiveCardView(card: card, busy: store.pendingActions.contains(card.id), connected: store.isConnected, modelConfigured: store.modelConfigured) { store.apply($0, to: card) }
-                            }
-                        }
-                    }
-                }
-                PromptView(store: store)
+                UsageDashboardView(store: store)
+                ConversationBoardView(store: store, onOpen: onConversation)
             }
-            .frame(maxWidth: 890, alignment: .leading)
-            .padding(.horizontal, 30).padding(.vertical, 30)
-            .frame(maxWidth: .infinity)
-        }
-        .background(Color.anotherCanvas)
-    }
-}
-
-@MainActor
-private struct HeroHeader: View {
-    @ObservedObject var store: AssistantStore
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 22) {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 9) {
-                    Text(Date.now.formatted(.dateTime.month(.wide).day().weekday(.wide)))
-                        .font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
-                    Text("留一点空间，专注眼前。")
-                        .font(.system(size: 27, weight: .semibold, design: .rounded)).foregroundStyle(Color.anotherInk)
-                    Text("在恰好的时候，帮你往前一步。")
-                        .font(.system(size: 13)).foregroundStyle(.secondary)
-                }
-                Spacer(minLength: 10)
-                Button { store.togglePause() } label: {
-                    Label(store.paused ? "恢复" : "暂停", systemImage: store.paused ? "play" : "pause")
-                }
-                .buttonStyle(.bordered).controlSize(.small)
-                .disabled(!store.isConnected || store.isChangingPause)
-            }
-            HStack(alignment: .top, spacing: 8) {
-                Circle().fill(store.isConnected ? Color.anotherGreen : .secondary).frame(width: 6, height: 6).padding(.top, 5)
-                Text(store.statusMessage).font(.system(size: 12)).foregroundStyle(.secondary).textSelection(.enabled)
-                Spacer()
-                Button { store.refresh() } label: { Image(systemName: "arrow.clockwise") }
-                    .buttonStyle(.plain).help("更新 Agent 状态").disabled(store.connection == .starting || store.isRestarting)
-            }
-        }
-        .padding(25)
-        .background(Color.anotherHero, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-    }
-}
-
-private struct MetricTile: View {
-    let title: String
-    let value: String
-    let icon: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 13) {
-            HStack {
-                Text(title).font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
-                Spacer()
-                Image(systemName: icon).font(.system(size: 12)).foregroundStyle(Color.anotherAccent)
-            }
-            Text(value).font(.system(size: 22, weight: .semibold, design: .rounded)).foregroundStyle(Color.anotherInk)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading).padding(16)
-        .background(.background, in: RoundedRectangle(cornerRadius: 16))
+            .frame(maxWidth: 980, alignment: .leading)
+            .padding(30).frame(maxWidth: .infinity)
+        }.background(Color.anotherCanvas)
     }
 }
 
 private struct SectionHeading: View {
+    @Environment(\.locale) private var interfaceLocale
     let title: String
     var subtitle: String? = nil
     var body: some View {
@@ -194,7 +119,8 @@ private struct SectionHeading: View {
 }
 
 @MainActor
-private struct ProactiveCardView: View {
+struct ProactiveCardView: View {
+    @Environment(\.locale) private var interfaceLocale
     let card: ProactiveCard
     let busy: Bool
     let connected: Bool
@@ -213,18 +139,18 @@ private struct ProactiveCardView: View {
                     Text(card.detail).font(.system(size: 12)).foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 0)
-                Text(busy ? "正在提交" : card.state.label)
+                Text(busy ? AppLocalization.text("正在提交") : card.state.label)
                     .font(.system(size: 10, weight: .medium)).foregroundStyle(card.state.tint)
                     .padding(.horizontal, 8).padding(.vertical, 5)
                     .background(card.state.tint.opacity(0.09), in: Capsule())
             }
-            Text(card.rationale).font(.system(size: 11)).foregroundStyle(.secondary)
+            Text(AppLocalization.text(card.rationale)).font(.system(size: 11)).foregroundStyle(.secondary)
             if let text = card.text, !text.isEmpty {
                 Text(text).font(.system(size: 13)).lineSpacing(4).textSelection(.enabled)
                     .padding(14).frame(maxWidth: .infinity, alignment: .leading)
                     .background(Color.anotherCanvas, in: RoundedRectangle(cornerRadius: 12))
                 if card.state == .completed {
-                    Button("复制草稿", systemImage: "doc.on.doc") {
+                    Button(AppLocalization.text("复制草稿"), systemImage: "doc.on.doc") {
                         NSPasteboard.general.clearContents()
                         NSPasteboard.general.setString(text, forType: .string)
                     }
@@ -234,7 +160,7 @@ private struct ProactiveCardView: View {
             if [.pending, .failed, .snoozed].contains(card.state) {
                 HStack(spacing: 9) {
                     Button(CardAction.execute.label, systemImage: CardAction.execute.icon) { onAction(.execute) }
-                        .buttonStyle(.borderedProminent).tint(Color.anotherInk).disabled(!modelConfigured)
+                        .buttonStyle(.borderedProminent).tint(Color.anotherAccent).disabled(!modelConfigured)
                     Button(CardAction.later.label) { onAction(.later) }
                     Button(CardAction.ignore.label) { onAction(.ignore) }.buttonStyle(.borderless).foregroundStyle(.secondary)
                     Spacer()
@@ -242,7 +168,7 @@ private struct ProactiveCardView: View {
                 .controlSize(.small).disabled(busy || !connected)
             }
             if let date = card.snoozedUntil, card.state == .snoozed {
-                Text("将在 \(date.formatted(date: .omitted, time: .shortened)) 再次提醒。")
+                Text(AppLocalization.text("将在 %@ 再次提醒。", AppLocalization.date(date, includeDate: false)))
                     .font(.system(size: 11)).foregroundStyle(.secondary)
             }
         }
@@ -252,133 +178,132 @@ private struct ProactiveCardView: View {
 }
 
 @MainActor
-private struct PromptView: View {
-    @ObservedObject var store: AssistantStore
-    @State private var prompt = ""
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            SectionHeading(title: "也可以一起想想")
-            ForEach(store.conversation) { message in
-                VStack(alignment: .leading, spacing: 10) {
-                    Text(message.prompt).font(.system(size: 13, weight: .medium)).textSelection(.enabled)
-                    if let response = message.response {
-                        Text(response).font(.system(size: 13)).lineSpacing(4).textSelection(.enabled)
-                    } else if let error = message.error {
-                        Text(error).font(.system(size: 12)).foregroundStyle(.red).textSelection(.enabled)
-                    } else {
-                        Text("正在等待本地模型回复…").font(.system(size: 12)).foregroundStyle(.secondary)
-                    }
-                }
-                .padding(16).frame(maxWidth: .infinity, alignment: .leading)
-                .background(.background, in: RoundedRectangle(cornerRadius: 14))
-            }
-            VStack(alignment: .trailing, spacing: 10) {
-                TextField("写下想梳理的一件事…", text: $prompt, axis: .vertical)
-                    .lineLimit(3...8).textFieldStyle(.plain).font(.system(size: 13))
-                    .disabled(!store.isConnected || !store.modelConfigured)
-                Button(store.hasPendingPrompt ? "正在生成" : "发送", systemImage: "arrow.up") {
-                    if store.ask(prompt) { prompt = "" }
-                }
-                .buttonStyle(.borderedProminent).tint(Color.anotherInk).controlSize(.small)
-                .keyboardShortcut(.return, modifiers: .command)
-                .disabled(prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !store.isConnected || !store.modelConfigured || store.hasPendingPrompt)
-            }
-            .padding(16).background(.background, in: RoundedRectangle(cornerRadius: 16))
-        }
-    }
-}
-
-@MainActor
-private struct HistoryView: View {
-    @ObservedObject var store: AssistantStore
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                SectionHeading(title: "活动记录", subtitle: "每次建议、决定和生成，留有依据")
-                if store.activityHistory.isEmpty {
-                    Text("还没有活动记录。")
-                        .font(.system(size: 13)).foregroundStyle(.secondary).padding(.vertical, 20)
-                }
-                LazyVStack(spacing: 10) {
-                    ForEach(store.activityHistory) { event in
-                        VStack(alignment: .leading, spacing: 7) {
-                            HStack {
-                                Text(title(for: event)).font(.system(size: 13, weight: .medium))
-                                Spacer()
-                                Text(event.date?.formatted(date: .abbreviated, time: .shortened) ?? "")
-                                    .font(.system(size: 10)).foregroundStyle(.secondary)
-                            }
-                            if let detail = event.payload["message"]?.string ?? event.payload["text"]?.string {
-                                Text(detail).font(.system(size: 12)).foregroundStyle(.secondary).textSelection(.enabled)
-                            }
-                        }
-                        .padding(16).frame(maxWidth: .infinity, alignment: .leading)
-                        .background(.background, in: RoundedRectangle(cornerRadius: 14))
-                    }
-                }
-            }
-            .frame(maxWidth: 890, alignment: .leading).padding(30).frame(maxWidth: .infinity)
-        }
-        .background(Color.anotherCanvas)
-    }
-
-    private func title(for event: AgentEvent) -> String {
-        switch event.kind {
-        case "proactive.suggestion": event.payload["title"]?.string ?? "新的主动建议"
-        case "proposal.updated": event.payload["state"]?.string.flatMap(CardState.init(rawValue:))?.label ?? "建议已更新"
-        case "agent.response": "模型回复已生成"
-        case "agent.error": "Agent 错误"
-        default: event.kind
-        }
-    }
-}
-
-@MainActor
 public struct SettingsView: View {
+    @Environment(\.locale) private var interfaceLocale
     @ObservedObject private var store: AssistantStore
-    @State private var draft: AgentSettings
-    @State private var saved = false
+    @ObservedObject private var updates: UpdateController
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     public init(store: AssistantStore) {
         self.store = store
-        _draft = State(initialValue: store.settings)
+        updates = store.updates
     }
 
+    private enum Page: String, CaseIterable, Identifiable {
+        case general = "通用", model = "模型", suggestions = "主动建议"
+        case desktop = "电脑操作", shortcuts = "快捷键", updates = "软件更新", archived = "已归档会话"
+        var id: String { rawValue }
+        var icon: String {
+            switch self {
+            case .general: "gearshape"
+            case .model: "cpu"
+            case .suggestions: "bell"
+            case .desktop: "desktopcomputer"
+            case .shortcuts: "keyboard"
+            case .updates: "arrow.down.circle"
+            case .archived: "archivebox"
+            }
+        }
+    }
+
+    @State private var page: Page = .general
+
     public var body: some View {
-        Form {
-            Section {
-                TextField("服务地址", text: $draft.endpoint)
-                TextField("模型名称", text: $draft.model, prompt: Text("例如 qwen3:8b"))
-                HStack {
-                    Button(store.isRestarting ? "正在重连…" : "保存并重新连接") {
-                        Task { saved = await store.saveSettings(draft) }
+        HStack(spacing: 0) {
+            VStack(spacing: 5) {
+                ForEach(Page.allCases) { item in
+                    Button { page = item } label: {
+                        Label(AppLocalization.text(item.rawValue), systemImage: item.icon)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 12).padding(.vertical, 10)
+                            .background(page == item ? Color.accentColor.opacity(0.12) : .clear,
+                                        in: RoundedRectangle(cornerRadius: 8))
                     }
-                    .disabled(store.isRestarting)
-                    if saved && store.settingsError == nil { Text("配置已保存").font(.caption).foregroundStyle(.secondary) }
+                    .buttonStyle(.plain)
+                    .accessibilityAddTraits(page == item ? .isSelected : [])
                 }
-                if let error = store.settingsError { Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled) }
-            } header: { Text("本地模型") }
+                Spacer()
+            }
+            .padding(12).frame(width: 160)
+            .background(Color(nsColor: .controlBackgroundColor))
+            Divider()
+            VStack(alignment: .leading, spacing: 0) {
+                Text(AppLocalization.text(page.rawValue)).font(.title2.bold()).padding(.horizontal, 22).padding(.top, 22)
+                Form {
+                    switch page {
+                    case .general: generalSettings
+                    case .model: modelSettings
+                    case .suggestions: suggestionSettings
+                    case .desktop: DesktopSettingsView(session: store.desktop)
+                    case .shortcuts: ShortcutSettingsView()
+                    case .updates: updateSettings
+                    case .archived: ConversationBoardView(store: store, archived: true)
+                    }
+                }
+                .formStyle(.grouped)
+                .id(page)
+                .transition(.opacity)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: page)
+        .frame(minWidth: 680, minHeight: 520)
+        .background(LocalizedWindowTitle(key: "设置").frame(width: 0, height: 0))
+        .task { updates.start() }
+    }
+
+    private var generalSettings: some View {
+        Group {
+            LanguageSettingsView()
+            Section(AppLocalization.text("外观")) {
+                Picker(AppLocalization.text("模式"), selection: Binding(get: { store.appearance }, set: store.setAppearance)) {
+                    ForEach(AppAppearance.allCases) { appearance in
+                        Text(appearance.title(locale: interfaceLocale)).tag(appearance)
+                    }
+                }
+                .pickerStyle(.segmented)
+            }
+        }
+    }
+
+    private var modelSettings: some View {
+        ModelSettingsView(session: store.modelSettings, modelsFileURL: store.modelsFileURL)
+    }
+
+    private var suggestionSettings: some View {
+        Group {
             Section {
-                LabeledContent("主动建议", value: store.isConnected ? (store.paused ? "已暂停" : "已开启") : "Agent 未连接")
-                Button(store.paused ? "恢复主动建议" : "暂停主动建议") { store.togglePause() }
+                LabeledContent(AppLocalization.text("主动建议"), value: store.isConnected ? (store.paused ? AppLocalization.text("已暂停") : AppLocalization.text("已开启")) : AppLocalization.text("Agent 未连接"))
+                Button(store.paused ? AppLocalization.text("恢复主动建议") : AppLocalization.text("暂停主动建议")) { store.togglePause() }
                     .disabled(!store.isConnected || store.isChangingPause)
-                Toggle("新建议显示系统通知", isOn: Binding(get: { store.notificationsEnabled }, set: { value in
+                Toggle(AppLocalization.text("新建议显示系统通知"), isOn: Binding(get: { store.notificationsEnabled }, set: { value in
                     Task { await store.setNotificationsEnabled(value) }
                 }))
                 .disabled(!store.notificationSupported)
-                if !store.notificationSupported { Text("系统通知需要从 Another You.app 启动。").font(.caption).foregroundStyle(.secondary) }
-                if let message = store.notificationMessage { Text(message).font(.caption).foregroundStyle(.secondary) }
-            } header: { Text("介入方式") }
-            Section("运行状态") {
-                LabeledContent("Agent", value: store.connection.label)
+                if !store.notificationSupported { Text(AppLocalization.text("系统通知需要从 Another You.app 启动。")).font(.caption).foregroundStyle(.secondary) }
+                if let message = store.notificationMessage { Text(AppLocalization.text(message)).font(.caption).foregroundStyle(.secondary) }
+            } header: { Text(AppLocalization.text("介入方式")) }
+            ProactiveContextSettingsView(session: store.proactiveContext, paused: store.paused)
+        }
+    }
+
+    private var updateSettings: some View {
+        Group {
+            Section(AppLocalization.text("软件更新")) {
+                LabeledContent(AppLocalization.text("版本"), value: AppLocalization.text(updates.version))
+                Toggle(AppLocalization.text("自动检查更新"), isOn: Binding(get: { updates.automaticallyChecks }, set: updates.setAutomaticChecks))
+                    .disabled(!updates.allowsAutomaticUpdates)
+                Toggle(AppLocalization.text("自动下载更新"), isOn: Binding(get: { updates.automaticallyDownloads }, set: updates.setAutomaticDownloads))
+                    .disabled(!updates.allowsAutomaticUpdates || !updates.automaticallyChecks)
+                Toggle(AppLocalization.text("自动安装更新"), isOn: Binding(get: { updates.automaticallyInstalls }, set: updates.setAutomaticInstalls))
+                    .disabled(!updates.allowsAutomaticUpdates || !updates.automaticallyDownloads)
+                Text(AppLocalization.text("开启后，当前任务完成时自动安装并重启。")).font(.caption).foregroundStyle(.secondary)
+                Button(AppLocalization.text("检查更新…"), action: updates.checkForUpdates).disabled(!updates.canCheck)
+                if let status = updates.status { Text(AppLocalization.message(status)).font(.caption).foregroundStyle(.secondary) }
             }
         }
-        .formStyle(.grouped)
-        .frame(minWidth: 500, minHeight: 400)
-        .onChange(of: draft) { _, _ in saved = false }
     }
+
 }
 
 private extension CardState {
@@ -399,5 +324,4 @@ private extension Color {
     static let anotherSidebar = Color(nsColor: .controlBackgroundColor)
     static let anotherAccent = Color.indigo
     static let anotherGreen = Color.green
-    static let anotherHero = Color.indigo.opacity(0.07)
 }

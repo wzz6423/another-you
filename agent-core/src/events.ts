@@ -2,11 +2,22 @@ import { randomUUID } from "node:crypto";
 
 export type AgentEventKind =
   | "proactive.suggestion"
+  | "proactive.status"
+  | "context.request"
+  | "context.cancel"
   | "scheduler.signal"
   | "scheduler.status"
   | "agent.status"
   | "agent.request"
   | "agent.response"
+  | "agent.usage"
+  | "agent.activity"
+  | "conversation.updated"
+  | "conversation.messages"
+  | "protocol.chunk"
+  | "model.catalog"
+  | "model.operation"
+  | "model.auth"
   | "proposal.updated"
   | "agent.error";
 
@@ -47,7 +58,17 @@ export function createAgentEvent<TPayload extends Record<string, unknown>>(
 }
 
 export function encodeEvent(event: AgentEvent): string {
-  return `${JSON.stringify(event)}\n`;
+  const json = JSON.stringify(event);
+  const bytes = Buffer.from(json);
+  if (bytes.length <= 3 * 1024 * 1024) return `${json}\n`;
+  const size = 128 * 1024;
+  const total = Math.ceil(bytes.length / size);
+  const chunks: string[] = [];
+  for (let index = 0; index < total; index++) {
+    chunks.push(JSON.stringify({ id: `${event.id}:${index}`, occurredAt: event.occurredAt, kind: "protocol.chunk", source: "system",
+      payload: { eventId: event.id, index, total, data: bytes.subarray(index * size, (index + 1) * size).toString("base64") } }));
+  }
+  return `${chunks.join("\n")}\n`;
 }
 
 export class EventBus {

@@ -1,5 +1,20 @@
 "use strict";
 
+const i18n = window.AnotherYouI18n;
+let storage;
+try { storage = window.localStorage; } catch { /* 私密浏览可能禁止存储。 */ }
+let language = i18n.initialLanguage(storage, navigator.languages ?? [navigator.language]);
+const t = (key) => i18n.text(language, key);
+const languageSelect = document.getElementById("language-select");
+for (const [code, name] of i18n.languages) {
+  const option = document.createElement("option");
+  option.value = code;
+  option.lang = code;
+  option.dir = "auto";
+  option.textContent = name;
+  languageSelect.append(option);
+}
+
 const scenarios = {
   morning: {
     source: "晨间规则",
@@ -36,7 +51,7 @@ const draftList = document.getElementById("draft-list");
 const decisions = new Map();
 let selectedScenario = "morning";
 
-function showScenario(key, { moveFocus = false } = {}) {
+function showScenario(key, { moveFocus = false, resetReason = true } = {}) {
   selectedScenario = key;
   const scenario = scenarios[key];
   tabs.forEach((tab) => {
@@ -46,12 +61,12 @@ function showScenario(key, { moveFocus = false } = {}) {
     if (selected && moveFocus) tab.focus();
   });
   panel.setAttribute("aria-labelledby", `tab-${key}`);
-  document.getElementById("demo-source").textContent = scenario.source;
+  document.getElementById("demo-source").textContent = t(scenario.source);
   document.getElementById("demo-time").textContent = scenario.time;
-  document.getElementById("demo-title").textContent = scenario.title;
-  document.getElementById("demo-message").textContent = scenario.message;
-  document.getElementById("demo-reason").textContent = scenario.reason;
-  document.getElementById("reason-details").open = false;
+  document.getElementById("demo-title").textContent = t(scenario.title);
+  document.getElementById("demo-message").textContent = t(scenario.message);
+  document.getElementById("demo-reason").textContent = t(scenario.reason);
+  if (resetReason) document.getElementById("reason-details").open = false;
   renderDecision(decisions.get(key));
 }
 
@@ -67,19 +82,19 @@ function renderDecision(decision, { moveFocus = false } = {}) {
   };
   const outcome = outcomes[decision];
   document.getElementById("outcome-icon").textContent = outcome.icon;
-  document.getElementById("outcome-title").textContent = outcome.title;
-  document.getElementById("outcome-description").textContent = outcome.description;
+  document.getElementById("outcome-title").textContent = t(outcome.title);
+  document.getElementById("outcome-description").textContent = t(outcome.description);
   draftList.replaceChildren();
   draftList.hidden = decision !== "accept";
   if (decision === "accept") {
     scenarios[selectedScenario].draft.forEach((text) => {
       const item = document.createElement("li");
-      item.textContent = text;
+      item.textContent = t(text);
       draftList.append(item);
     });
   }
   if (moveFocus) {
-    announcement.textContent = outcome.title;
+    announcement.textContent = t(outcome.title);
     document.getElementById("reset-suggestion").focus({ preventScroll: true });
   }
 }
@@ -88,8 +103,10 @@ tabs.forEach((tab, index) => {
   tab.addEventListener("click", () => showScenario(tab.dataset.scenario));
   tab.addEventListener("keydown", (event) => {
     let nextIndex;
-    if (event.key === "ArrowDown" || event.key === "ArrowRight") nextIndex = (index + 1) % tabs.length;
-    if (event.key === "ArrowUp" || event.key === "ArrowLeft") nextIndex = (index - 1 + tabs.length) % tabs.length;
+    const forward = language === "ar" ? "ArrowLeft" : "ArrowRight";
+    const backward = language === "ar" ? "ArrowRight" : "ArrowLeft";
+    if (event.key === "ArrowDown" || event.key === forward) nextIndex = (index + 1) % tabs.length;
+    if (event.key === "ArrowUp" || event.key === backward) nextIndex = (index - 1 + tabs.length) % tabs.length;
     if (event.key === "Home") nextIndex = 0;
     if (event.key === "End") nextIndex = tabs.length - 1;
     if (nextIndex === undefined) return;
@@ -108,22 +125,37 @@ for (const [buttonId, decision] of [["accept-suggestion", "accept"], ["snooze-su
 document.getElementById("reset-suggestion").addEventListener("click", () => {
   decisions.delete(selectedScenario);
   showScenario(selectedScenario);
-  announcement.textContent = "已重置当前时机，可以重新选择。";
+  announcement.textContent = t("已重置当前时机，可以重新选择。");
   document.getElementById("accept-suggestion").focus({ preventScroll: true });
 });
 
+let copyStatusKey = "";
 document.getElementById("copy-command").addEventListener("click", async () => {
   const command = document.getElementById("start-command");
   const status = document.getElementById("copy-status");
   try {
     await navigator.clipboard.writeText(command.textContent.trim());
-    status.textContent = "启动命令已复制。";
+    copyStatusKey = "启动命令已复制。";
   } catch {
     const selection = window.getSelection();
     const range = document.createRange();
     range.selectNodeContents(command);
     selection.removeAllRanges();
     selection.addRange(range);
-    status.textContent = "浏览器未允许自动复制。命令已选中，请按 ⌘C（或 Ctrl+C）复制。";
+    copyStatusKey = "浏览器未允许自动复制。命令已选中，请按 ⌘C（或 Ctrl+C）复制。";
   }
+  status.textContent = t(copyStatusKey);
 });
+
+function changeLanguage(nextLanguage, persist = false) {
+  language = nextLanguage;
+  languageSelect.value = language;
+  i18n.apply(language, document);
+  showScenario(selectedScenario, { resetReason: false });
+  announcement.textContent = "";
+  if (copyStatusKey) document.getElementById("copy-status").textContent = t(copyStatusKey);
+  if (persist) i18n.saveLanguage(storage, language);
+}
+
+languageSelect.addEventListener("change", () => changeLanguage(languageSelect.value, true));
+changeLanguage(language);

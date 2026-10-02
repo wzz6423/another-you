@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "node": {
+    "version": "22.23.3",
+    "sha256": {
+      "arm64": "23b25245dcfb9af7262f8ff142e9e2e0af025368117329e7a7458a51e5922f53",
+      "x86_64": "8a677b0219178efd6eb0e475457c4afb452b521a92f6e67845a73bd85727f2a8"
+    }
+  },
+  "browser": {
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12",
+    "revision": "1243",
+    "sha256": {
+      "arm64": "89d80a6d26ccd0ccfd51e22d9e1297283862af2b0cd91dce07459b35ca0059f2",
+      "x86_64": "5c2eaa1aad62111bb5a70dd0889dd3093f3142277b8f78957a238257ee85f009"
+    }
+  }
+}

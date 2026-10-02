@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "repository": "wzz6423/another-you",
+  "homepage": "https://github.com/wzz6423/another-you",
+  "downloadURLTemplate": "https://github.com/wzz6423/another-you/releases/download/v{version}/{filename}",
+  "feedURLTemplate": "https://github.com/wzz6423/another-you/releases/latest/download/appcast-{arch}.xml",
+  "fallbackFeedURLTemplate": "https://gitee.com/wzz6423/another-you/releases/download/update-release/appcast-{arch}.xml",
+  "fallbackDownloadURLTemplate": "https://gitee.com/wzz6423/another-you/releases/download/v{version}/{filename}",
+  "publicEDKey": null
+}

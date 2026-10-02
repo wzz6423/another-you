@@ -2,7 +2,7 @@
 
 [English](CONTRIBUTING.md) | **简体中文**
 
-本指南面向已获私有仓库访问权限的贡献者。开发统一使用 GitHub；Gitee 仅提供镜像访问与版本发布。
+欢迎参与开源项目。开发统一使用 GitHub；Gitee 仅提供镜像访问与版本发布。
 
 GitHub Project 仅保留 Board 视图与字段配置，不新建任务卡，也不自动将 Issue 或 Pull Request 加入看板。Issue 与 Pull Request 继续在 GitHub 仓库正常开展。
 

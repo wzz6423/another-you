@@ -1,22 +1,16 @@
 {
   "version": 1,
   "dataDir": "~/Library/Application Support/AnotherYou",
-  "model": {
-    "provider": "local",
-    "model": "qwen3:8b",
-    "endpoint": "http://127.0.0.1:11434/v1",
-    "temperature": 0.2
-  },
   "tools": {
-    "filesystem": false,
-    "shell": false,
-    "network": false,
+    "filesystem": true,
+    "shell": true,
+    "network": true,
     "calendar": false,
     "notifications": true
   },
   "privacy": {
-    "mode": "strict-local",
-    "allowNetwork": false,
+    "mode": "local-first",
+    "allowNetwork": true,
     "allowedNetworkHosts": [],
     "storePrompts": true,
     "storeResponses": true,
@@ -27,5 +21,16 @@
     "pollIntervalMs": 30000,
     "defaultCooldownMs": 1800000,
     "defaultDedupeWindowMs": 300000
-  }
+  },
+  "proactive": {
+    "enabled": true,
+    "workIntervalMs": 300000,
+    "notificationsIntervalMs": 180000,
+    "synthesisIntervalMs": 600000,
+    "suggestionCooldownMs": 900000,
+    "taskSpacingMs": 30000,
+    "collectionTimeoutMs": 15000,
+    "taskTimeoutMs": 90000
+  },
+  "permissionMode": "full-access"
 }

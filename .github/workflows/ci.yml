@@ -42,7 +42,7 @@ jobs:
 
   swift:
     name: SwiftUI macOS
-    runs-on: macos-15
+    runs-on: xcode-27
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -55,14 +55,25 @@ jobs:
           node-version: 22.19.0
           cache: npm
           cache-dependency-path: agent-core/package-lock.json
+      - name: Verify Xcode 27 toolchain
+        run: |
+          ./scripts/xcode-toolchain.sh --version
+          xcodebuild -version
+          xcrun --sdk macosx --show-sdk-path
       - name: Install sidecar dependencies
         run: make deps
       - name: Build
-        run: make build
+        run: |
+          make build
+          BIN_DIR="$(./scripts/xcode-toolchain.sh build --package-path macos/AnotherYou --show-bin-path)"
+          xcrun vtool -show-build "$BIN_DIR/AnotherYou"
+          test "$(xcrun vtool -show-build "$BIN_DIR/AnotherYou" | awk '$1 == "sdk" { print $2; exit }')" = "$(xcrun --sdk macosx --show-sdk-version)"
       - name: Test
         run: make test-swift
       - name: Test development lifecycle
         run: make test-scripts
+      - name: Test release tooling
+        run: make test-release
       - name: Build development app
         env:
           OUTPUT_DIRECTORY: ${{ runner.temp }}/another-you-app
@@ -74,6 +85,11 @@ jobs:
           test -x "$APP_PATH/Contents/MacOS/AnotherYou"
           test -x "$APP_PATH/Contents/Resources/runtime/node"
           test -f "$APP_PATH/Contents/Resources/agent-core/src/cli.ts"
+          test -x "$APP_PATH/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate"
+          xcrun vtool -show-build "$APP_PATH/Contents/MacOS/AnotherYou"
+          otool -L "$APP_PATH/Contents/MacOS/AnotherYou" | grep -F '@rpath/Sparkle.framework/'
+          otool -l "$APP_PATH/Contents/MacOS/AnotherYou" | grep -F '@executable_path/../Frameworks'
+          test "$(/usr/libexec/PlistBuddy -c 'Print :AnotherYouUpdatesEnabled' "$APP_PATH/Contents/Info.plist")" = false
           plutil -lint "$APP_PATH/Contents/Info.plist"
           codesign --verify --deep --strict "$APP_PATH"
           printf '%s\n' '{"op":"status"}' '{"op":"shutdown"}' |
