@@ -46,33 +46,27 @@ final class JSONLTests: XCTestCase {
 }
 
 final class SettingsTests: XCTestCase {
-    func testOnlyLoopbackModelEndpointsAreAccepted() throws {
-        for endpoint in ["http://127.0.0.1:11434/v1", "http://localhost:1234/v1", "http://[::1]:8080/v1"] {
-            XCTAssertNoThrow(try AgentSettings(endpoint: endpoint, model: "local-model").validated())
-        }
-        for endpoint in ["https://example.com/v1", "http://127.0.0.1.evil.test/v1", "http://user:secret@localhost/v1", "file:///tmp/socket", "http://localhost/v1?key=secret"] {
-            XCTAssertThrowsError(try AgentSettings(endpoint: endpoint, model: "local-model").validated())
-        }
-        XCTAssertThrowsError(try AgentSettings(model: " ").validated())
-    }
-
-    func testSettingsPersistWithoutDroppingExistingConfiguration() throws {
+    func testApplicationConfigDoesNotDefineModels() throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let repository = AgentSettingsRepository(dataDirectory: directory)
-        try Data("{\"scheduler\":{\"enabled\":false},\"privacy\":{\"mode\":\"custom\",\"allowNetwork\":true,\"allowedNetworkHosts\":[\"example.com\"],\"storePrompts\":false}}".utf8).write(to: repository.configURL)
-        let expected = AgentSettings(endpoint: "http://127.0.0.1:11434/v1", model: "qwen3:8b")
-        try repository.save(expected)
-        XCTAssertEqual(try repository.load(), expected)
+        try repository.ensureConfig()
         let data = try Data(contentsOf: repository.configURL)
         let config = try JSONDecoder().decode([String: JSONValue].self, from: data)
-        XCTAssertEqual(config["scheduler"]?.object?["enabled"], .bool(false))
-        XCTAssertEqual(config["privacy"]?.object?["storePrompts"], .bool(false))
-        XCTAssertEqual(config["privacy"]?.object?["allowNetwork"], .bool(false))
-        XCTAssertEqual(config["privacy"]?.object?["allowedNetworkHosts"], .array([]))
-        XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("apiKey"))
+        XCTAssertNil(config["model"])
+        XCTAssertEqual(config["permissionMode"], .string("full-access"))
         let attributes = try FileManager.default.attributesOfItem(atPath: repository.configURL.path)
         XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+    }
+
+    func testExistingApplicationConfigIsNotOverwritten() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let repository = AgentSettingsRepository(dataDirectory: directory)
+        let contents = Data("{\"scheduler\":{\"enabled\":false},\"model\":{\"model\":\"legacy\"}}".utf8)
+        try contents.write(to: repository.configURL)
+        try repository.ensureConfig()
+        XCTAssertEqual(try Data(contentsOf: repository.configURL), contents)
     }
 
     func testInvalidExistingConfigIsReportedRatherThanOverwritten() throws {
@@ -81,7 +75,7 @@ final class SettingsTests: XCTestCase {
         let repository = AgentSettingsRepository(dataDirectory: directory)
         let contents = Data("not valid JSON".utf8)
         try contents.write(to: repository.configURL)
-        XCTAssertThrowsError(try repository.save(AgentSettings(model: "qwen3:8b")))
+        XCTAssertThrowsError(try repository.ensureConfig())
         XCTAssertEqual(try Data(contentsOf: repository.configURL), contents)
     }
 
@@ -93,6 +87,8 @@ final class SettingsTests: XCTestCase {
         try Data().write(to: root.appendingPathComponent("src/cli.ts"))
         let runtime = directory.appendingPathComponent("runtime", isDirectory: true)
         try FileManager.default.createDirectory(at: runtime, withIntermediateDirectories: true)
+        try Data().write(to: directory.appendingPathComponent("runtime-required"))
+        try Data("{\"schemaVersion\":1}".utf8).write(to: runtime.appendingPathComponent("manifest.json"))
         let node = runtime.appendingPathComponent("node")
         try Data("#!/bin/sh\nexit 0\n".utf8).write(to: node)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: node.path)
@@ -100,8 +96,19 @@ final class SettingsTests: XCTestCase {
         let bundled = try SidecarLaunchConfiguration.resolve(configURL: config, environment: [:], resourceDirectory: directory, workingDirectory: directory, executableURL: nil)
         XCTAssertEqual(bundled.executable, node)
         XCTAssertEqual(bundled.arguments.suffix(2), ["--config", config.path])
-        XCTAssertThrowsError(try SidecarLaunchConfiguration.resolve(configURL: config, environment: ["ANOTHER_YOU_NODE": directory.appendingPathComponent("missing").path], resourceDirectory: directory, workingDirectory: directory, executableURL: nil))
-        XCTAssertThrowsError(try SidecarLaunchConfiguration.resolve(configURL: config, environment: ["ANOTHER_YOU_AGENT_ROOT": directory.appendingPathComponent("missing").path], resourceDirectory: directory, workingDirectory: directory, executableURL: nil))
+        let overridden = try SidecarLaunchConfiguration.resolve(configURL: config, environment: ["ANOTHER_YOU_NODE": "/missing/node", "ANOTHER_YOU_AGENT_ROOT": "/missing/agent"], resourceDirectory: directory, workingDirectory: directory, executableURL: nil)
+        XCTAssertEqual(overridden.executable, node)
+        XCTAssertEqual(overridden.workingDirectory, root)
+        let environment = bundled.processEnvironment(["PATH": "/private/tools", "NODE_OPTIONS": "--require /private/config.js", "NODE_PATH": "/private/modules", "DYLD_LIBRARY_PATH": "/private/lib", "HOME": directory.path])
+        XCTAssertEqual(environment["PATH"], runtime.path + ":/private/tools")
+        XCTAssertEqual(environment["HOME"], directory.path)
+        XCTAssertNil(environment["NODE_OPTIONS"])
+        XCTAssertNil(environment["NODE_PATH"])
+        XCTAssertNil(environment["DYLD_LIBRARY_PATH"])
+        try FileManager.default.removeItem(at: node)
+        XCTAssertThrowsError(try SidecarLaunchConfiguration.resolve(configURL: config, environment: ["ANOTHER_YOU_NODE": "/bin/sh"], resourceDirectory: directory, workingDirectory: directory, executableURL: nil))
+        try FileManager.default.removeItem(at: runtime)
+        XCTAssertThrowsError(try SidecarLaunchConfiguration.resolve(configURL: config, environment: ["ANOTHER_YOU_NODE": "/bin/sh"], resourceDirectory: directory, workingDirectory: directory, executableURL: nil))
     }
 }
 
@@ -126,6 +133,73 @@ private final class TestAgentClient: AgentClient {
 
 @MainActor
 final class AssistantStoreTests: XCTestCase {
+    func testModelPageUsesPiStatusAndRefreshDoesNotWriteConfiguration() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let repository = AgentSettingsRepository(dataDirectory: directory)
+        try repository.ensureConfig()
+        let original = try Data(contentsOf: repository.configURL)
+        let client = TestAgentClient()
+        let store = AssistantStore(client: client, repository: repository)
+        client.connected()
+        client.emit(event("agent.status", payload: ["model": .object([
+            "configured": .bool(true), "model": .string("pi-selected"),
+            "provider": .string("pi-provider"), "reasoningEffort": .string("high"),
+            "message": .string("Pi 配置已读取")
+        ])]))
+        XCTAssertEqual(store.modelName, "pi-selected")
+        XCTAssertEqual(store.modelProvider, "pi-provider")
+        XCTAssertEqual(store.reasoningEffort, "high")
+        store.refresh()
+        XCTAssertEqual(client.commands.last?["op"], .string("status"))
+        XCTAssertEqual(try Data(contentsOf: repository.configURL), original)
+        await store.shutdown()
+    }
+
+    func testUpdateInstallationWaitsForBackgroundAnalysisAndResetsOnDisconnect() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let client = TestAgentClient()
+        let store = AssistantStore(client: client, repository: AgentSettingsRepository(dataDirectory: directory))
+        store.connect()
+        client.connected()
+        XCTAssertTrue(store.canInstallUpdate)
+        client.emit(event("proactive.status", payload: ["running": .bool(true)]))
+        XCTAssertFalse(store.canInstallUpdate)
+        client.emit(event("proactive.status", payload: ["running": .bool(false)]))
+        XCTAssertTrue(store.canInstallUpdate)
+        client.emit(event("agent.status", payload: ["proactive": .object(["running": .bool(true)])]))
+        XCTAssertFalse(store.canInstallUpdate)
+        await client.stop()
+        XCTAssertTrue(store.canInstallUpdate)
+        await store.shutdown()
+    }
+
+    func testUpdateInstallationWaitsForPromptsCardsAndShutdown() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let client = TestAgentClient()
+        let store = AssistantStore(client: client, repository: AgentSettingsRepository(dataDirectory: directory))
+        store.connect()
+        XCTAssertFalse(store.canInstallUpdate)
+        client.connected()
+        XCTAssertTrue(store.canInstallUpdate)
+        XCTAssertTrue(store.ask("生成草稿"))
+        XCTAssertFalse(store.canInstallUpdate)
+        let requestID = try XCTUnwrap(store.conversation.last?.id)
+        client.emit(event("agent.response", payload: ["requestId": .string(requestID), "text": .string("已生成")]))
+        XCTAssertTrue(store.canInstallUpdate)
+        client.emit(event("proactive.suggestion", id: "s-update", payload: ["title": .string("草稿")]))
+        store.apply(.execute, to: try XCTUnwrap(store.cards.first))
+        XCTAssertFalse(store.canInstallUpdate)
+        client.emit(event("proposal.updated", payload: ["suggestionId": .string("s-update"), "state": .string("running")]))
+        XCTAssertFalse(store.canInstallUpdate)
+        client.emit(event("proposal.updated", payload: ["suggestionId": .string("s-update"), "state": .string("completed")]))
+        XCTAssertTrue(store.canInstallUpdate)
+        await store.shutdown()
+        XCTAssertFalse(store.canInstallUpdate)
+    }
+
     func testStartsEmptyAndOnlyUpdatesDecisionsAfterAgentAcknowledges() async throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -329,6 +403,7 @@ final class NodeSidecarIntegrationTests: XCTestCase {
         try repository.ensureConfig()
         var environment = ProcessInfo.processInfo.environment
         environment["ANOTHER_YOU_AGENT_ROOT"] = agentRoot.path
+        environment["PI_CODING_AGENT_DIR"] = directory.appendingPathComponent("pi").path
         let launch = try SidecarLaunchConfiguration.resolve(configURL: repository.configURL, environment: environment, resourceDirectory: nil, workingDirectory: root, executableURL: nil)
         let client = ProcessAgentClient(launchConfiguration: launch)
         let store = AssistantStore(client: client, repository: repository)

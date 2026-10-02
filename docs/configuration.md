@@ -18,75 +18,56 @@ For an existing JSON file, `dataDir` controls state independently of the configu
 
 The product supports macOS. The standalone core also defines data-directory defaults for Windows (`%APPDATA%/AnotherYou`) and other systems (`$XDG_DATA_HOME/another-you`, falling back to `~/.local/share/another-you`); these do not imply native-client support on those platforms.
 
-## General and model fields
+## App configuration and Pi models
 
-| Field | Type / default | Meaning |
-| --- | --- | --- |
-| `version` | Number, `1` | Only configuration version 1 is supported. |
-| `dataDir` | String, platform data directory | Directory containing runtime state. |
-| `model.provider` | String, `local` | `local`, `openai-compatible`, or `anthropic`. |
-| `model.model` | String, `local-default` | Exact service model name. The default is a placeholder and cannot be used for a request. |
-| `model.endpoint` | String, `http://127.0.0.1:11434/v1` for `local` | HTTP(S) base URL. Other providers require an explicit endpoint. |
-| `model.apiKeyEnv` | Optional string, unset | Name of an environment variable containing the key; never the key itself. |
-| `model.temperature` | Number, `0.2` | Finite value from 0 to 2. |
+`version` is `1`, `dataDir` stores application state, and `permissionMode` is fixed to `full-access`. The legacy JSON `model` field no longer selects a runtime model.
 
-`local` and `openai-compatible` use Pi's OpenAI Chat Completions path; `anthropic` uses its Messages path. An endpoint containing credentials, a query, or a fragment is rejected. `localhost` is normalized to `127.0.0.1`; a root path becomes `/v1` for non-Anthropic providers. Match the base URL to the service's actual API.
+Models, endpoints, authentication, capabilities, and thinking levels come from Pi's native configuration:
 
-For `local`, the backend accepts loopback hosts (`localhost`, `127.*`, or `::1`). The Swift settings screen is narrower: `localhost`, `127.0.0.1`, or `::1` only. With no `apiKeyEnv`, local requests use a fixed non-secret placeholder key. If `apiKeyEnv` is supplied, its variable must be set. Both other providers always require an explicit key-variable name, including when their endpoint is loopback. `apiKey` and `api_key` fields are rejected; Pi login state and default provider key variables are not loaded automatically.
+| Pi file | Purpose |
+| --- | --- |
+| `settings.json` | `defaultProvider`, `defaultModel`, default and per-model thinking levels. |
+| `models.json` | Custom providers, local models, endpoints, compatibility parameters, and model overrides. |
+| `auth.json` | Pi-managed authentication, including API keys and OAuth. |
 
-`model.configured` in status means the model name, endpoint policy, and key reference are valid. `model.available` is `null` before a request, `true` after success, or `false` after failure; invalid configuration also reports `false`. This status belongs to the current sidecar run. Rule suggestions and successful settings saves do not test model availability.
+The app uses an isolated `<dataDir>/pi` directory. It does not read `~/.pi/agent`, `PI_CODING_AGENT_DIR`, or provider keys from the host environment. Settings list all chat models from the Pi SDK and local catalog cache, support model/provider search, and save the default model and per-model thinking level. Missing defaults do not trigger selection of another provider.
+
+Accounts use the API-key and OAuth methods supplied by the Pi SDK, including web, device-code, and manual-code flows with cancellation. Credentials are written only to the isolated `auth.json`; the directory uses mode `0700`, and configuration/authentication files use `0600`. Authentication prompts and replies are sent through the live protocol without entering conversation or state history. The app does not execute credential commands or resolve environment-based credentials; such references are marked as requiring configuration and must be removed when setting up the account in the app.
+
+“Import Pi configuration…” accepts `models.json` or its directory, plus optional `settings.json` from the same directory. It imports model definitions and a valid default selection, removes API keys, headers, and authentication environment fields, does not copy the source `auth.json`, and preserves current accounts. Existing personal Pi configuration remains unchanged.
+
+For local Ollama, place this example in **Pi's models.json**:
+
+```json
+{"providers":{"ollama":{"baseUrl":"http://localhost:11434/v1","api":"openai-completions","apiKey":"ollama","models":[{"id":"qwen3:8b"}]}}}
+```
+
+After saving custom models, click “Reload configuration”, select a model, and click “Use this model”. Startup and reload restore local configuration and cached catalogs. “Update model catalog” explicitly asks the SDK to refresh configured providers; successful partial updates remain visible if another refresh fails. Model configuration changes are blocked during a model request or account operation. `model.configured` means credentials are configured; `model.available` describes the latest request outcome. Saving configuration or refreshing a catalog does not prove model availability or send a test prompt.
 
 ## Privacy and network fields
 
 | Field | Type / default | Meaning |
 | --- | --- | --- |
-| `privacy.mode` | String, `strict-local` | `strict-local`, `local-first`, or `custom`. The latter two currently use the same explicit remote-host checks. |
-| `privacy.allowNetwork` | Boolean, `false` | Allows non-loopback model requests only with the other checks below. `strict-local` forces this to `false`. |
-| `privacy.allowedNetworkHosts` | String array, `[]` | Exact hostnames, trimmed and lowercased. No URL scheme, port, path, or wildcard matching. |
+| `privacy.mode` | String, `local-first` | Legacy values are accepted and normalized to `local-first`. |
+| `privacy.allowNetwork` | Boolean, `true` | Always enabled in full-access mode. |
+| `privacy.allowedNetworkHosts` | String array, `[]` | Legacy compatibility; full access does not use a host allowlist. |
 | `privacy.storePrompts` | Boolean, `true` | Retain prompt/context/signal content in persisted state. |
 | `privacy.storeResponses` | Boolean, `true` | Retain response text in persisted state. |
 | `privacy.redactSecrets` | Boolean, `true` | Apply basic credential-pattern redaction when saving state. |
 
-A non-loopback endpoint requires all of: a provider other than `local`, mode `local-first` or `custom`, `allowNetwork=true`, an exact hostname in `allowedNetworkHosts`, and HTTPS. Each fetch rechecks the destination, requires the configured origin, and rejects HTTP redirects. This policy does not control dependency downloads, Git commands, or other processes.
-
-For a deliberately authorized remote OpenAI-compatible service, a configuration can contain the following. `api.example.com` and `REPLACE_WITH_MODEL` are placeholders, not a working service:
-
-```json
-{
-  "version": 1,
-  "model": {
-    "provider": "openai-compatible",
-    "model": "REPLACE_WITH_MODEL",
-    "endpoint": "https://api.example.com/v1",
-    "apiKeyEnv": "ANOTHER_YOU_MODEL_KEY",
-    "temperature": 0.2
-  },
-  "privacy": {
-    "mode": "local-first",
-    "allowNetwork": true,
-    "allowedNetworkHosts": ["api.example.com"],
-    "storePrompts": false,
-    "storeResponses": false,
-    "redactSecrets": true
-  }
-}
-```
-
-Set the named key in the actual sidecar process environment without committing it. Apps launched from Finder do not necessarily inherit terminal exports. Requests send the submitted prompt and, for proposals, explicit context to the chosen service; storage settings do not remove them from a live request.
-
-Saving the Swift local-model settings replaces the model section with `local` and temperature `0.2`, removes its key reference, resets privacy to `strict-local`, disables network authorization, empties allowed hosts, and sets `tools.network=false`. Storage preferences survive. Do not expect a manually configured remote model to survive a later save from this UI.
+Model requests follow Pi provider configuration, authentication, and protocol handling. The app no longer maintains separate model endpoint validation. Content-storage flags only control Another You state persistence.
 
 ## Tool declarations and native notifications
 
 | Field | Default |
 | --- | --- |
-| `tools.filesystem` | `false` |
-| `tools.shell` | `false` |
-| `tools.network` | `false` |
+| `tools.filesystem` | `true` |
+| `tools.shell` | `true` |
+| `tools.network` | `true` |
 | `tools.calendar` | `false` |
 | `tools.notifications` | `true` |
 
-All tool fields are booleans. They declare policy; the current Pi adapter always receives an empty tool list. Setting a field to `true` does not add a connector or an executable model tool. `tools.network` is not the switch for model HTTP requests; those use the model and privacy rules above.
+The runtime provides file read/write, directory listing, shell, and HTTP tools for direct execution. The first three tool flags are always enabled; legacy restrictions are migrated. `calendar` remains a compatibility declaration with no bundled calendar connector. macOS still manages operating-system permissions.
 
 Native notifications are controlled by `AssistantStore`, a separate `UserDefaults` preference, and macOS permission. `tools.notifications` does not enable or disable them. Notifications require a packaged app, user opt-in, an inactive app, and an unpaused suggestion event; delivery still depends on macOS. See the [macOS guide](../macos/AnotherYou/README.md).
 
@@ -101,9 +82,24 @@ Native notifications are controlled by `AssistantStore`, a separate `UserDefault
 
 Durations must be finite and non-negative; configuration values are rounded down to integer milliseconds. Individual rules can override cooldown and deduplication. The built-in rules use their own cooldowns. Rule definitions and examples are in the [CLI reference](cli-reference.md). The Swift idle sampler has its own fixed 30-second interval; changing `pollIntervalMs` does not change that sampler.
 
+## Proactive work-analysis fields
+
+| Field | Default | Meaning |
+| --- | ---: | --- |
+| `proactive.enabled` | `true` | Enable background collection and analysis; pausing proactive suggestions also stops pending collection. |
+| `proactive.workIntervalMs` | `300000` | Work-window check interval, 5 minutes. |
+| `proactive.notificationsIntervalMs` | `180000` | Accessible notification-content check interval, 3 minutes. |
+| `proactive.synthesisIntervalMs` | `600000` | Parent-agent synthesis interval, 10 minutes. |
+| `proactive.suggestionCooldownMs` | `900000` | Minimum interval between proactive suggestions, 15 minutes. |
+| `proactive.taskSpacingMs` | `30000` | Minimum spacing between background tasks, 30 seconds. |
+| `proactive.collectionTimeoutMs` | `15000` | Swift collection-response timeout. |
+| `proactive.taskTimeoutMs` | `90000` | Total subagent or parent-agent timeout. |
+
+Work and notification tasks run separately; content fingerprints, notification digests, and suggestion cooldowns persist across restarts. Unchanged content skips model calls, and failures use exponential backoff. Subagents only analyze and return structured facts; the parent agent decides whether to create one suggestion. Background agents have no file, shell, network, or desktop-execution tools. macOS collection reads only the currently visible Accessibility text from the frontmost work window and Notification Center; it does not take screenshots, scan notification databases, or read files. Permission, locked-session, and disappeared-notification states are explicit.
+
 ## What state retains
 
-State includes rules, pause state, proposal states, cooldown timestamps, hashed deduplication keys, up to 200 history events, and up to 100 completed/ignored proposals in total. Pending, running, snoozed, and failed proposals remain retained. Status events are not added to the history. An interrupted running proposal becomes failed on restart and is not automatically retried.
+State includes rules, pause state, proposal states, cooldown timestamps, hashed deduplication keys, up to 200 history events, separate `usageRecords` retained for 30 days (tokens, model, reasoning depth, tool calls, and outcome), and up to 100 completed/ignored proposals in total. Pending, running, snoozed, and failed proposals remain retained. Status events are not added to the history. An interrupted running proposal becomes failed on restart and is not automatically retried.
 
 - `storePrompts=false` removes `prompt`, `context`, and `signal` from persisted history, clears proposal context, and removes rule context. Rule titles/messages and proposal titles/summaries remain; this is not a switch that erases every piece of user text.
 - `storeResponses=false` removes history and proposal `text` fields.
@@ -116,14 +112,19 @@ These controls operate on the saved copy, not the live JSONL stream or in-memory
 
 | Name | Consumer / effect |
 | --- | --- |
-| `ANOTHER_YOU_DATA_DIR` | Swift host: directory containing `config.json`. Saving local-model settings also sets `dataDir` to that directory. The standalone Node CLI does not read this variable; use `--config` and `dataDir`. |
+| `ANOTHER_YOU_DATA_DIR` | Swift host: directory containing `config.json`. New application configuration sets `dataDir` to that directory. The standalone Node CLI does not read this variable; use `--config` and `dataDir`. |
 | `ANOTHER_YOU_AGENT_ROOT` | Swift host: explicit absolute path to `agent-core`; takes precedence over bundle/development lookup. |
 | `ANOTHER_YOU_NODE` | Swift host and packaging: explicit Node executable path. It does not select the `npm` executable used for installation. |
 | `OUTPUT_DIRECTORY` | Packaging: output directory, default `dist/macos`; `make run`/`make update` use fixed `dist/dev` instead. |
 | `BUNDLE_NODE` | Packaging: `0` for machine-provided Node, `1` to copy a compatible self-contained Node; default `0`. |
+| `APP_VERSION` / `APP_BUILD` | Packaging: version and build, default `0.1.0` / `1`. |
+| `BUILD_ARCH` | Packaging: `arm64` or `x86_64`, default host architecture. |
+| `ANOTHER_YOU_NODE_LICENSE` | Packaging: explicit Node license; bundled Node requires an adjacent license or this path. |
 | `PORT` | `make website`: loopback preview port, default `4173`. |
 | `PI_GIT_TRANSPORT` | Source bootstrap: `ssh` selects the configured GitHub SSH transport; default HTTPS. |
 | `PI_SOURCE_DIR` | Source bootstrap: override the default `agent-core/.cache/pi`. |
 | `PI_SOURCE_LOCK` | Source bootstrap: override the default `agent-core/pi-source.lock.json`. |
 
 Use absolute paths for runtime overrides. An explicit missing Agent or Node path causes an error rather than falling back. The Swift host normally tries bundled resources before development paths or system Node. `ANOTHER_YOU_DATA_DIR` does not relocate the `UserDefaults` notification preference. See [packaging](releasing.md) and [sources](sources.md) for the relevant commands.
+
+App update preferences use the `UserDefaults` keys `SUEnableAutomaticChecks`, `SUAutomaticallyUpdate`, and `AnotherYouAutomaticallyInstallsUpdates`, separate from Agent configuration. All start disabled. See [releasing](releasing.md) for feeds, public keys, and release environment variables.

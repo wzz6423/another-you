@@ -1,20 +1,12 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir, platform } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { parseProactiveConfig, type ProactiveConfig } from "./proactive-config.ts";
 
 export const CONFIG_VERSION = 1;
 
 export type PrivacyMode = "strict-local" | "local-first" | "custom";
-export type ModelProvider = "local" | "openai-compatible" | "anthropic";
 export type ToolName = "filesystem" | "shell" | "network" | "calendar" | "notifications";
-
-export interface ModelConfig {
-  provider: ModelProvider;
-  model: string;
-  endpoint?: string;
-  apiKeyEnv?: string;
-  temperature: number;
-}
 
 export interface ToolConfig {
   filesystem: boolean;
@@ -41,12 +33,13 @@ export interface SchedulerConfig {
 }
 
 export interface AgentConfig {
+  permissionMode: "full-access";
   version: typeof CONFIG_VERSION;
   dataDir: string;
-  model: ModelConfig;
   tools: ToolConfig;
   privacy: PrivacyPolicy;
   scheduler: SchedulerConfig;
+  proactive: ProactiveConfig;
 }
 
 export class ConfigError extends Error {
@@ -56,24 +49,17 @@ export class ConfigError extends Error {
   }
 }
 
-const DEFAULT_MODEL: ModelConfig = {
-  provider: "local",
-  model: "local-default",
-  endpoint: "http://127.0.0.1:11434/v1",
-  temperature: 0.2,
-};
-
 const DEFAULT_TOOLS: ToolConfig = {
-  filesystem: false,
-  shell: false,
-  network: false,
+  filesystem: true,
+  shell: true,
+  network: true,
   calendar: false,
   notifications: true,
 };
 
 const DEFAULT_PRIVACY: PrivacyPolicy = {
-  mode: "strict-local",
-  allowNetwork: false,
+  mode: "local-first",
+  allowNetwork: true,
   allowedNetworkHosts: [],
   storePrompts: true,
   storeResponses: true,
@@ -128,39 +114,19 @@ export function configPathForDataDir(dataDir = defaultDataDir()): string {
   return join(expandPath(dataDir), "config.json");
 }
 
+export function piDirectoryForDataDir(dataDir: string): string {
+  return join(expandPath(dataDir), "pi");
+}
+
 export function createDefaultConfig(dataDir = defaultDataDir()): AgentConfig {
   return {
+    permissionMode: "full-access",
     version: CONFIG_VERSION,
     dataDir: expandPath(dataDir),
-    model: { ...DEFAULT_MODEL },
     tools: { ...DEFAULT_TOOLS },
     privacy: { ...DEFAULT_PRIVACY, allowedNetworkHosts: [] },
     scheduler: { ...DEFAULT_SCHEDULER },
-  };
-}
-
-function parseModel(value: unknown): ModelConfig {
-  if (value === undefined) return { ...DEFAULT_MODEL };
-  if (!isRecord(value)) throw new ConfigError("model 必须是对象");
-  if ("apiKey" in value || "api_key" in value) {
-    throw new ConfigError("禁止把 API 密钥写入配置，请使用 apiKeyEnv 指向环境变量");
-  }
-  const provider = value.provider ?? DEFAULT_MODEL.provider;
-  if (provider !== "local" && provider !== "openai-compatible" && provider !== "anthropic") {
-    throw new ConfigError("model.provider 不受支持");
-  }
-  const temperature = value.temperature ?? DEFAULT_MODEL.temperature;
-  if (typeof temperature !== "number" || !Number.isFinite(temperature) || temperature < 0 || temperature > 2) {
-    throw new ConfigError("model.temperature 必须位于 0 到 2 之间");
-  }
-  const endpoint = value.endpoint === undefined ? undefined : stringValue(value.endpoint, "model.endpoint");
-  const apiKeyEnv = value.apiKeyEnv === undefined ? undefined : stringValue(value.apiKeyEnv, "model.apiKeyEnv");
-  return {
-    provider,
-    model: stringValue(value.model, "model.model", DEFAULT_MODEL.model),
-    ...(endpoint ? { endpoint } : {}),
-    ...(apiKeyEnv ? { apiKeyEnv } : {}),
-    temperature,
+    proactive: parseProactiveConfig(undefined),
   };
 }
 
@@ -217,25 +183,26 @@ export function parseAgentConfig(value: unknown, dataDirOverride?: string): Agen
   }
   const dataDir = dataDirOverride ?? stringValue(value.dataDir, "dataDir", defaultDataDir());
   const config = {
+    permissionMode: "full-access",
     version: CONFIG_VERSION,
     dataDir: expandPath(dataDir),
-    model: parseModel(value.model),
     tools: parseTools(value.tools),
     privacy: parsePrivacy(value.privacy),
     scheduler: parseScheduler(value.scheduler),
+    proactive: parseProactiveConfig(value.proactive),
   } satisfies AgentConfig;
-  if (config.privacy.mode === "strict-local") {
-    config.privacy.allowNetwork = false;
-  }
+  config.tools.filesystem = true;
+  config.tools.shell = true;
+  config.tools.network = true;
+  config.privacy.mode = "local-first";
+  config.privacy.allowNetwork = true;
+  config.privacy.allowedNetworkHosts = [];
   return config;
 }
 
 export function isToolAllowed(config: AgentConfig, tool: ToolName): boolean {
-  if (!config.tools[tool]) return false;
-  if (tool === "network") {
-    return config.privacy.mode !== "strict-local" && config.privacy.allowNetwork;
-  }
-  return true;
+  if (tool === "filesystem" || tool === "shell" || tool === "network") return true;
+  return config.tools[tool];
 }
 
 export async function loadConfig(configPath = configPathForDataDir()): Promise<AgentConfig> {

@@ -32,6 +32,8 @@ CLI 恢复状态、启动已启用的调度、检查当前时间、发出 `app-l
 | `pause` / `resume` | 无 | 持久化暂停状态，输出调度与 Agent 状态；暂停不取消已提交的模型请求。 |
 | `signal` | `signal`；可选 `now` | 接收时间、事件或闲置信号。 |
 | `tick` | 可选 `now`、`idleForMs` | 恢复到期的稍后建议并检查时间/闲置规则。 |
+| `contextCapabilities` | `sources` | 宿主声明可提供的 `work`、`notifications` 采集来源。 |
+| `contextResult` | `contextResult` | 宿主返回带 `requestId` 的异步采集结果；迟到或不匹配的回执会被丢弃。 |
 | `addRule` | `rule` | 新增或按相同 ID 替换规则，并持久化。 |
 | `removeRule` | `ruleId` | 删除规则并持久化剩余规则；已有建议保留。 |
 | `shutdown` | 无 | 停止调度、取消当前请求并退出。 |
@@ -40,9 +42,33 @@ CLI 恢复状态、启动已启用的调度、检查当前时间、发出 `app-l
 
 `now` 和信号 `at` 必须是有效日期字符串，主动提供时应包含时区。`idleForMs` 是有限非负数。正常使用应省略模拟时间戳，并报告真实测量的闲置时长。调度禁用或暂停时不处理信号和到期稍后建议，直接提问与用户决定仍可使用。
 
-同时只允许一个 `prompt` 或 `decide/execute` 模型请求。新的同类命令立即报错，不进入队列。状态、暂停/恢复、稍后/忽略和关闭仍可处理。请求最多运行 60 秒，不隐式重试。协议没有单独取消请求的命令，也不输出逐 token 事件。
+同时只允许一个 `prompt` 或 `decide/execute` 模型请求。新的同类命令立即报错，不进入队列。状态、暂停/恢复、稍后/忽略和关闭仍可处理。单次模型 HTTP 请求最多 60 秒，整个工具循环最多 180 秒，不隐式重试。`cancel` 取消当前模型和工具，不输出逐 token 事件。截图附件和电脑工具回执见[操作协议](desktop-automation.zh-CN.md#协议与开发验证)。
 
 规则编辑和 signal/tick 没有通用确认事件。通过 `status` 检查规则变化；一个信号未产生建议也可能是正常结果。
+
+## 模型配置与认证协议
+
+以下命令均携带独立的 `requestId`：
+
+| `op` | 字段 | 行为 |
+| --- | --- | --- |
+| `modelCatalog` | 可选 `refresh: true` | 读取本地模型目录；显式刷新时请求已配置提供方的目录。 |
+| `modelSelect` | `provider`、`model`；可选 `thinkingLevel` | 保存 Pi 默认模型与受支持的思考深度。 |
+| `modelLogin` | `provider`、`authType: api_key / oauth` | 启动 Pi 认证交互。 |
+| `modelAuthReply` | 登录的 `requestId`、`promptId`、`value` | 回复当前认证问题；错误或过期的 prompt 不结束原登录。 |
+| `modelAuthCancel` | 当前操作的 `requestId` | 取消账户操作或目录刷新。 |
+| `modelLogout` | `provider` | 移除该提供方的独立账户凭据。 |
+| `modelImport` | `path`（绝对路径） | 导入模型定义与默认选择，不导入凭据。 |
+
+`model.catalog` 返回 `models`、`providers`、可选 `selected` 与 `message`。`model.operation` 返回 `operation` 和 `state`（`started`、`succeeded`、`failed`、`cancelled`）；发送命令不代表保存成功。`model.auth` 使用 `stage` 表示 `prompt`、`promptResolved`、`promptCancelled` 或 `notify`，并携带 `requestId`、`provider`。prompt 类型遵循 Pi：`text`、`secret`、`manual_code`、`select`，选择项提交其 `id`。
+
+模型修改、登录和刷新互斥，并与模型请求互斥；本地目录读取仍可用。认证操作最长 10 分钟，目录刷新最长 20 秒。EOF、关闭或断开会取消等待中的认证。认证内容仅即时传输，不进入 EventBus、会话和状态历史。真实提供方登录和模型兼容性需要另行验证。
+
+## 会话与活动协议
+
+`prompt` 可选 `conversationId`，省略时兼容 `default` 会话，各会话隔离上下文。`conversationAction` 要求 `conversationId` 和 `action`（`archive`、`unarchive`、`delete`）；执行中拒绝归档和删除。成功事件 `conversation.updated` 含 `conversationId`、可选 `action`、`conversations` 和 `proposals`；失败事件 `agent.error` 带 `conversationId`。
+
+`agent.status.payload.conversations` 包含 `id`、`title`、可选 `appName`、`createdAt`、`updatedAt`、`state` 和 `archived`；消息通过下文的按需读取协议返回。重启恢复遵循 `privacy.storePrompts` / `privacy.storeResponses`；截图二进制不持久化。`agent.activity` 仅记录 `category`（`thinking`、`execution`、`command`、`context`）、`phase`（`started`、`completed`、`failed`）、可选 `toolName` 和 `source`，不传输思考正文或命令参数。
 
 ## 输入示例
 
@@ -101,15 +127,18 @@ CLI 恢复状态、启动已启用的调度、检查当前时间、发出 `app-l
 
 | `kind` | 主要 payload 字段 |
 | --- | --- |
-| `agent.status` | `configPath`、`paused`、`schedulerEnabled`、`model`、`rules`、`proposals`、`history` |
+| `agent.status` | `configPath`、`paused`、`schedulerEnabled`、`model`、`proactive`、`rules`、`proposals`、`history`、`usageRecords` |
 | `scheduler.status` | `running`，部分事件带 `paused` |
+| `proactive.status` | `taskId`、`running`、`tasks`、`sources`、`intervals` |
+| `context.request` / `context.cancel` | `requestId`、`source`；请求或取消工作/通知采集 |
 | `proactive.suggestion` | `suggestionId`、`ruleId`、`title`、`message`、`summary`、`reason`、`createdAt`、`state`、`trigger`、`context`、`signal` |
 | `agent.request` | `requestId`、`prompt` |
+| `agent.usage` | `source`、`model`、`outcome`、可选 `usage`、`reasoningEffort`、`toolCalls` |
 | `agent.response` | `requestId`、`text`、`model` |
 | `proposal.updated` | `suggestionId`、`decision`、`state`；可选 `text`、`snoozedUntil` |
 | `agent.error` | `message`，适用时带 `requestId` 或 `suggestionId` |
 
-事件类型联合中有 `scheduler.signal`，但当前默认命令流程不会发出它。模型任务完成或失败后都会再输出状态。模型状态含 `configured`、`available`、`endpoint`、`model` 和 `message`，含义见 [配置参考](configuration.zh-CN.md)。
+事件类型联合中有 `scheduler.signal`，但当前默认命令流程不会发出它。模型任务完成或失败后都会再输出状态。模型状态含 `configured`、`available`、`endpoint`、`model`、`provider`、`reasoningEffort`、`configDirectory` 和 `message`，含义见 [配置参考](configuration.zh-CN.md)。
 
 始终使用 `payload.suggestionId` 作为建议的稳定身份。外层 `id` 只代表单次事件，不能在稍后建议恢复时据此新增第二张卡片。状态快照中的建议使用 `id`，还包含 `ruleId`、`title`、`summary`、`reason`、`createdAt`、`state`、`context`，以及可选 `text`/`snoozedUntil`。
 
@@ -125,3 +154,12 @@ CLI 恢复状态、启动已启用的调度、检查当前时间、发出 `app-l
 | `failed` | 生成失败或中断，用户可重试、稍后或忽略。 |
 
 `execute` 先发出 `running`，随后为带文本的 `completed`，或带错误文本的 `failed`；失败时还会发出 `agent.error`。客户端应依据这些事件或后续状态快照判断成功，重启后不会自动重试。完整流程见 [架构](architecture.zh-CN.md)，持久化限制见 [配置参考](configuration.zh-CN.md)。
+
+用量记录独立保留最近 30 天。`usage` 包括 `inputTokens`、`outputTokens`、`cacheReadTokens`、`cacheWriteTokens`、`totalTokens`；未报告时省略。`outcome` 为 `completed` 或 `failed`，失败已报告的消耗也计入。`toolCalls` 每项包含 `name` 和 `kind`（`tool` / `plugin` / `skill` / `mcp`）。当前内置文件、Shell 和网络工具，未接入的扩展不会产生虚构记录。主会话携带最近 20 轮成功对话上下文，与建议独立，重启不恢复。
+
+
+### 会话按需读取与大消息传输
+
+`agent.status` 和 `conversation.updated` 的 `conversations` 只含会话摘要，不重复发送全部消息。打开会话时发送 `{"op":"conversationRead","conversationId":"…","readId":"…"}`，回执 `conversation.messages` 包含相同 ID 和完整 `conversation`。读取回执不保存到活动记录；客户端忽略旧 `readId` 的迟到回执。
+
+普通事件仍是一行 JSON。UTF-8 编码超过 3 MiB 的事件会由 `encodeEvent` 透明拆成 `protocol.chunk`；每块 payload 包含 `eventId`、从 0 开始的 `index`、`total` 与 base64 `data`（每块原始字节最多 128 KiB）。宿主按顺序恢复原事件后才分发，拒绝乱序、重复和超过 64 MiB 的合并内容。缺块不会分发部分事件，后续完整事件或新的分块序列可恢复。内容不因帧上限而截断。

@@ -2,7 +2,7 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-A static product page in Chinese, introducing proactive suggestions, user control, and local operation. There is no build step, frontend dependency, external font, analytics script, account form, or live Agent connection.
+A static product page in 17 languages, introducing proactive suggestions, user control, and local operation. There is no build step, frontend dependency, external font, analytics script, account form, or live Agent connection.
 
 ## Preview
 
@@ -26,6 +26,7 @@ You can also open [index.html](index.html) directly. If the browser does not per
 | --- | --- |
 | [index.html](index.html) | Content, navigation, demo controls, startup instructions |
 | [styles.css](styles.css) | Layout, typography, responsive styles, reduced motion |
+| [locales.js](locales.js), [i18n.js](i18n.js) | Translation dictionaries, language resolution, metadata, and RTL |
 | [script.js](script.js) | Scenario selection, demo decisions, reset, copying |
 | [mark.svg](mark.svg) | Project brand mark |
 
@@ -38,11 +39,15 @@ All drafts and reasons are fixed examples. The page does not read device activit
 From the repository root:
 
 ```bash
+node --check website/locales.js
+node --check website/i18n.js
 node --check website/script.js
+node --test website/i18n.test.cjs
 ```
 
 For browser verification, check:
 
+- All 17 languages, persisted selection, system-language fallback, Arabic RTL, and translated demo/copy feedback.
 - Desktop and narrow mobile layouts, including 320–390 px widths and horizontal overflow.
 - All three scenarios and all three decisions, switching between stored choices, and reset.
 - Tab focus, arrow/Home/End navigation, reason disclosure, and status announcements.
@@ -55,6 +60,6 @@ Syntax checks do not establish visual or interaction quality. Keep screenshots a
 
 A static host can serve this directory with `index.html` as its entry point. The repository has no website deployment configuration or established public deployment.
 
-The product is a development preview and its repositories require access. The main call to action leads to source-running instructions, not an installer. Keep the page aligned with implemented behavior: Calendar, Mail, Notes, screen reading, notarized distribution, and automatic updates are not available.
+The product is a development preview and its repositories are open source. The main call to action leads to source-running instructions, not an installer. Keep the page aligned with implemented behavior: Configured release builds support automatic updates, but public installers, notarized distribution, and a Homebrew cask have not been published. Check the current implementation and corresponding documentation for other capabilities.
 
-Today and Google Antigravity are design references. The layout, project graphics, and wording are original to this project; reference links and adoption boundaries are in [sources](../docs/sources.md). Project documentation has English and Chinese versions; the website UI itself is currently Chinese only.
+Today and Google Antigravity are design references. The layout, project graphics, and wording are original to this project; reference links and adoption boundaries are in [sources](../docs/sources.md). Project documentation has English and Chinese versions; the website UI supports 17 languages. See [interface languages](../docs/localization.md) for language selection, persistence, fallback, and translation maintenance.

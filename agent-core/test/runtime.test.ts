@@ -7,7 +7,9 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import test, { type TestContext } from "node:test";
-import { AgentCore, type AgentEvent, type AgentConfig, type Proposal, type TriggerRule, createDefaultConfig, parseAgentConfig, saveConfig, PiSdkBackend, modelEndpoint, assertNetworkAllowed } from "../src/index.ts";
+import { AgentCore, type AgentEvent, type AgentConfig, type Proposal, type TriggerRule, createDefaultConfig, parseAgentConfig, saveConfig, PiSdkBackend } from "../src/index.ts";
+
+import { usePiFixture } from "./pi-fixture.ts";
 
 type Body = Record<string, unknown>;
 interface ModelRequest { url: string; headers: IncomingMessage["headers"]; body: Body }
@@ -37,8 +39,7 @@ async function configFor(t: TestContext, endpoint?: string): Promise<AgentConfig
   const dataDir = await mkdtemp(join(tmpdir(), "another-you-runtime-"));
   t.after(() => rm(dataDir, { recursive: true, force: true }));
   const config = createDefaultConfig(dataDir);
-  config.model.model = "fixture";
-  if (endpoint) config.model.endpoint = endpoint;
+  await usePiFixture(t, dataDir, endpoint);
   return config;
 }
 
@@ -73,52 +74,52 @@ async function childCore(t: TestContext, config: AgentConfig) {
   return { child, events, send, wait, exit, stderr: () => stderr };
 }
 
-test("官方 Pi SDK 调用本地 HTTP 模型并明确禁用工具", async (t) => {
+test("官方 Pi SDK 调用本地 HTTP 模型并提供真实工具", async (t) => {
   const server = await modelServer(t);
   const config = await configFor(t, server.endpoint);
   const backend = new PiSdkBackend(config);
+  await backend.initialize();
   assert.equal(backend.status().available, null);
   const response = await backend.run({ prompt: "帮我整理一个空白计划" });
   assert.equal(response.text, "这是可审阅的本地草稿。");
   assert.equal(server.requests.length, 1);
   assert.equal(server.requests[0].url, "/v1/chat/completions");
   assert.equal(server.requests[0].body.model, "fixture");
-  assert.equal(server.requests[0].headers.authorization, "Bearer another-you-local");
-  assert.equal(server.requests[0].body.tools, undefined);
+  assert.equal(server.requests[0].headers.authorization, "Bearer another-you-fixture");
+  const toolNames = (server.requests[0].body.tools as { function: { name: string } }[]).map((tool) => tool.function.name);
+  for (const name of ["filesystem", "network", "shell"]) assert.ok(toolNames.includes(name));
   assert.equal(backend.status().available, true);
 });
 
-test("新安装的占位模型和空模型明确未配置且不发送 HTTP 请求", async (t) => {
+test("后台子 agent 与父 agent 使用独立角色且没有执行工具", async (t) => {
   const server = await modelServer(t);
-  const fixtureConfig = await configFor(t, server.endpoint);
-  const config = createDefaultConfig(fixtureConfig.dataDir);
-  config.model.endpoint = server.endpoint;
+  const config = await configFor(t, server.endpoint);
   const backend = new PiSdkBackend(config);
-  assert.equal(backend.status().configured, false);
-  assert.equal(backend.status().available, false);
-  assert.match(backend.status().message, /尚未选择模型/);
-  await assert.rejects(backend.run({ prompt: "你好" }), /尚未选择模型/);
-  config.model.model = " ";
-  assert.equal(backend.status().configured, false);
-  await assert.rejects(backend.run({ prompt: "你好" }), /尚未选择模型/);
-  assert.equal(server.requests.length, 0);
+  t.after(() => backend.close());
+  for (const agentRole of ["context-analyst", "notification-analyst", "proactive-parent"] as const) {
+    const response = await backend.run({ agentRole, prompt: "分析 fixture 数据" });
+    assert.equal(response.metadata?.toolsEnabled, false);
+    assert.equal(response.metadata?.agentRole, agentRole);
+    const request = server.requests.at(-1)!;
+    assert.equal((request.body.tools as unknown[] | undefined)?.length ?? 0, 0);
+    assert.match(JSON.stringify(request.body.messages), agentRole === "proactive-parent" ? /汇总父 agent/ : /分析子 agent/);
+  }
 });
 
-test("strict-local 和精确主机允许列表在发送请求前阻止外网", async (t) => {
-  const config = await configFor(t);
-  config.model.provider = "openai-compatible";
-  config.model.endpoint = "https://models.example/v1";
-  await assert.rejects(new PiSdkBackend(config).run({ prompt: "private" }), /隐私策略/);
-  config.privacy.mode = "custom";
-  config.privacy.allowNetwork = true;
-  assert.throws(() => modelEndpoint(config), /allowedNetworkHosts/);
-  config.privacy.allowedNetworkHosts = ["models.example"];
-  assert.equal(modelEndpoint(config).host, "models.example");
-  assert.throws(() => assertNetworkAllowed(config, new URL("https://models.example.evil/v1")), /allowedNetworkHosts/);
-  assert.throws(() => assertNetworkAllowed(config, new URL("http://models.example/v1")), /HTTPS/);
-  config.model.provider = "local";
-  assert.throws(() => modelEndpoint(config), /本机回环/);
+test("Pi 未设置默认模型时明确未配置且忽略旧应用模型配置", async (t) => {
+  const server = await modelServer(t);
+  const config = await configFor(t, server.endpoint);
+  await writeFile(join(config.dataDir, "pi", "settings.json"), "{}");
+  const legacy = parseAgentConfig({ ...config, model: { provider: "local", model: "fixture", endpoint: server.endpoint } });
+  const backend = new PiSdkBackend(legacy);
+  await backend.initialize();
+  assert.equal(backend.status().configured, false);
+  assert.match(backend.status().message, /设置中选择模型/);
+  await assert.rejects(backend.run({ prompt: "你好" }), /设置中选择模型/);
+  assert.equal(server.requests.length, 0);
+  assert.equal("model" in legacy, false);
 });
+
 
 test("模型重定向不能带走私有内容或密钥", async (t) => {
   const target = await modelServer(t);
@@ -282,9 +283,78 @@ test("模型挂起时仍能暂停、查询、拒绝并发并及时关闭", async
   assert.equal(proc.events.some((event) => event.kind === "agent.response"), false);
 });
 
-test("strict-local 配置覆盖外部网络授权，拒绝持久化明文 API 密钥", () => {
+test("旧 strict-local 配置迁移完全权限，拒绝持久化明文 API 密钥", () => {
   const config = parseAgentConfig({ privacy: { mode: "strict-local", allowNetwork: true }, model: { endpoint: "https://external.example/v1" } });
-  assert.equal(config.privacy.allowNetwork, false);
-  assert.throws(() => modelEndpoint(config), /回环/);
-  assert.throws(() => parseAgentConfig({ model: { apiKey: "never-store-this" } }), /API 密钥/);
+  assert.equal(config.privacy.allowNetwork, true);
+  assert.equal("model" in config, false);
+  assert.equal(JSON.stringify(parseAgentConfig({ model: { apiKey: "never-store-this" } })).includes("never-store-this"), false);
+});
+
+
+test("Pi 工具循环实际执行命令并累计每轮 token 和失败前用量", async (t) => {
+  let turn = 0;
+  const server = await modelServer(t, (res, request) => {
+    turn += 1;
+    const first = turn === 1;
+    if (!first) {
+      const messages = request.body.messages as { role: string; content: string }[];
+      assert.ok(messages.some((message) => message.role === "tool" && message.content.includes("tool-integration-ok")));
+    }
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    const delta = first
+      ? { role: "assistant", tool_calls: [{ index: 0, id: "tool-1", type: "function", function: { name: "shell", arguments: JSON.stringify({ command: "printf tool-integration-ok" }) } }] }
+      : { role: "assistant", content: "命令已完成" };
+    const chunks = [
+      { id: `turn-${turn}`, choices: [{ index: 0, delta, finish_reason: null }] },
+      { id: `turn-${turn}`, choices: [{ index: 0, delta: {}, finish_reason: first ? "tool_calls" : "stop" }], usage: { prompt_tokens: 20, completion_tokens: 5, total_tokens: 25 } },
+    ];
+    res.end(chunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("") + "data: [DONE]\n\n");
+  });
+  const backend = new PiSdkBackend(await configFor(t, server.endpoint));
+  let summary: unknown;
+  const response = await backend.run({ prompt: "执行测试命令", onUsage: (value) => { summary = value; } });
+  assert.equal(response.text, "命令已完成");
+  assert.equal(server.requests.length, 2);
+  assert.deepEqual(response.toolCalls, [{ name: "shell", kind: "tool" }]);
+  assert.deepEqual(response.usage, { inputTokens: 40, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 50 });
+  assert.equal(response.reasoningEffort, "off");
+  assert.deepEqual(summary, { model: "fixture", outcome: "completed", usage: response.usage, reasoningEffort: "off", toolCalls: response.toolCalls });
+});
+
+test("工具执行后模型失败仍报告已消耗 token，未报告用量保持未知", async (t) => {
+  let turn = 0;
+  const server = await modelServer(t, (res) => {
+    if (++turn > 1) { res.writeHead(503); res.end("unavailable"); return; }
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    const chunk = { id: "failed-turn", choices: [{ index: 0, delta: { role: "assistant", tool_calls: [{ index: 0, id: "tool-failed", type: "function", function: { name: "shell", arguments: JSON.stringify({ command: "printf done" }) } }] }, finish_reason: "tool_calls" }], usage: { prompt_tokens: 12, completion_tokens: 3, total_tokens: 15 } };
+    res.end(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`);
+  });
+  const backend = new PiSdkBackend(await configFor(t, server.endpoint));
+  let summary: import("../src/pi-adapter.ts").PiRunUsage | undefined;
+  await assert.rejects(backend.run({ prompt: "失败用量", onUsage: (value) => { summary = value; } }));
+  assert.equal(summary?.outcome, "failed");
+  assert.equal(summary?.usage?.totalTokens, 15);
+  assert.deepEqual(summary?.toolCalls, [{ name: "shell", kind: "tool" }]);
+  const unknownServer = await modelServer(t);
+  const unknown = await new PiSdkBackend(await configFor(t, unknownServer.endpoint)).run({ prompt: "未知用量" });
+  assert.equal(unknown.usage, undefined);
+});
+
+test("JSONL 首次状态已加载 Pi，status 命令刷新 Pi 配置且不发送模型请求", async (t) => {
+  const server = await modelServer(t);
+  const config = await configFor(t, server.endpoint);
+  const proc = await childCore(t, config);
+  const initial = await proc.wait((event) => event.kind === "agent.status");
+  assert.equal((initial.payload.model as Body).configured, true);
+  assert.equal((initial.payload.model as Body).provider, "fixture-provider");
+  assert.equal((initial.payload.model as Body).configDirectory, join(config.dataDir, "pi"));
+  await writeFile(join(config.dataDir, "pi", "settings.json"), "{}");
+  const marker = proc.events.length;
+  proc.send({ op: "status" });
+  const refreshed = await proc.wait((event) => event.kind === "agent.status", marker);
+  assert.equal((refreshed.payload.model as Body).configured, false);
+  assert.equal((refreshed.payload.model as Body).model, "");
+  assert.equal(server.requests.length, 0);
+  proc.send({ op: "shutdown" });
+  assert.equal((await proc.exit)[0], 0, proc.stderr());
 });

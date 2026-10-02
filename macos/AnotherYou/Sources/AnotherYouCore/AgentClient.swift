@@ -65,6 +65,21 @@ public struct SidecarLaunchConfiguration: Sendable {
         executableURL: URL? = Bundle.main.executableURL
     ) throws -> SidecarLaunchConfiguration {
         let fileManager = FileManager.default
+        if let resourceDirectory,
+           fileManager.fileExists(atPath: resourceDirectory.appendingPathComponent("runtime-required").path) || fileManager.fileExists(atPath: resourceDirectory.appendingPathComponent("runtime").path) {
+            let root = resourceDirectory.appendingPathComponent("agent-core", isDirectory: true)
+            let node = resourceDirectory.appendingPathComponent("runtime/node")
+            guard fileManager.fileExists(atPath: resourceDirectory.appendingPathComponent("runtime/manifest.json").path),
+                  fileManager.fileExists(atPath: root.appendingPathComponent("src/cli.ts").path),
+                  fileManager.isExecutableFile(atPath: node.path) else {
+                throw AgentClientError.message("应用运行文件不完整，请重新安装完整的 Another You 应用。")
+            }
+            return SidecarLaunchConfiguration(
+                executable: node,
+                arguments: ["--experimental-strip-types", root.appendingPathComponent("src/cli.ts").path, "--stdio", "--config", configURL.path],
+                workingDirectory: root
+            )
+        }
         var roots: [URL] = []
         if let override = environment["ANOTHER_YOU_AGENT_ROOT"] {
             roots = [URL(fileURLWithPath: override, isDirectory: true)]
@@ -101,6 +116,16 @@ public struct SidecarLaunchConfiguration: Sendable {
             workingDirectory: root
         )
     }
+
+    func processEnvironment(_ inherited: [String: String]) -> [String: String] {
+        var environment = inherited
+        for key in inherited.keys where key == "NODE_OPTIONS" || key == "NODE_PATH" || key.hasPrefix("DYLD_") {
+            environment.removeValue(forKey: key)
+        }
+        environment["PATH"] = executable.deletingLastPathComponent().path + ":" + (inherited["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin")
+        environment["ANOTHER_YOU_DESKTOP_HOST"] = "1"
+        return environment
+    }
 }
 
 private enum SidecarOutput: Sendable {
@@ -117,6 +142,7 @@ public final class ProcessAgentClient: AgentClient {
     private var startupTask: Task<Void, Never>?
     private var generation = UUID()
     private var framer = JSONLFramer()
+    private var eventDecoder = AgentEventDecoder()
     private var stderr = Data()
     private var stdoutClosed = false
     private var exitCode: Int32?
@@ -133,6 +159,7 @@ public final class ProcessAgentClient: AgentClient {
         process.executableURL = configuration.executable
         process.arguments = configuration.arguments
         process.currentDirectoryURL = configuration.workingDirectory
+        process.environment = configuration.processEnvironment(ProcessInfo.processInfo.environment)
         process.standardInput = inputPipe
         process.standardOutput = outputPipe
         process.standardError = errorPipe
@@ -141,6 +168,7 @@ public final class ProcessAgentClient: AgentClient {
         // 子进程可能在输入写入前退出，禁用该管道的 SIGPIPE 可保留应用恢复入口。
         _ = fcntl(inputPipe.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
         framer = JSONLFramer()
+        eventDecoder = AgentEventDecoder()
         stderr = Data()
         exitCode = nil
         stdoutClosed = false
@@ -234,6 +262,7 @@ public final class ProcessAgentClient: AgentClient {
             do { for line in try framer.append(data) { decode(line) } }
             catch {
                 framer = JSONLFramer()
+                eventDecoder = AgentEventDecoder()
                 onMessage?(.protocolError(error.localizedDescription))
             }
         case .stderr(let data):
@@ -241,6 +270,7 @@ public final class ProcessAgentClient: AgentClient {
             if stderr.count > 4096 { stderr = Data(stderr.suffix(4096)) }
         case .stdoutClosed:
             if let remaining = try? framer.finish() { decode(remaining) }
+            do { try eventDecoder.finish() } catch { onMessage?(.protocolError(error.localizedDescription)) }
             stdoutClosed = true
         case .exited(let code): exitCode = code
         }
@@ -260,7 +290,7 @@ public final class ProcessAgentClient: AgentClient {
 
     private func decode(_ data: Data) {
         do {
-            let event = try JSONDecoder().decode(AgentEvent.self, from: data)
+            guard let event = try eventDecoder.decode(data) else { return }
             guard !event.id.isEmpty, event.date != nil else { throw AgentClientError.message("Agent 返回了无效事件。") }
             if event.kind == "agent.status" && !receivedStatus {
                 receivedStatus = true
@@ -268,6 +298,9 @@ public final class ProcessAgentClient: AgentClient {
                 onMessage?(.connection(.connected))
             }
             onMessage?(.event(event))
-        } catch { onMessage?(.protocolError("无法读取 Agent 消息：\(error.localizedDescription)")) }
+        } catch {
+            eventDecoder = AgentEventDecoder()
+            onMessage?(.protocolError("无法读取 Agent 消息：\(error.localizedDescription)"))
+        }
     }
 }

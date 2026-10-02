@@ -2,11 +2,11 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-The native SwiftUI client for the 0.1.0 development preview. It provides a main window, menu bar controls, local-model settings, and optional system notifications. The UI currently uses Chinese. Agent rules, model requests, and persisted suggestion state live in the Node sidecar.
+The native SwiftUI client for the 0.1.0 development preview. It provides a main window, menu bar controls, Pi model status, and optional system notifications. The UI currently uses Chinese. Agent rules, model requests, and persisted suggestion state live in the Node sidecar.
 
 ## Run from source
 
-Requirements: macOS 14+, Swift 6, Node.js 22.19+, and npm. Run from the repository root:
+The app supports macOS 14+. Source builds require full Xcode 27+ with the macOS 27+ SDK, Node.js 22.19+, and npm. Run from the repository root:
 
 ```bash
 make deps
@@ -26,26 +26,38 @@ For direct Swift development without an app bundle:
 
 ```bash
 ANOTHER_YOU_AGENT_ROOT="$PWD/agent-core" \
-  swift run --package-path macos/AnotherYou AnotherYou
+  ./scripts/xcode-toolchain.sh run --package-path macos/AnotherYou AnotherYou
 ```
 
 Direct execution supports the main UI and sidecar, but system notifications require an `.app` bundle. Quit through the menu bar or use `Ctrl+C` for a foreground source run.
 
-## Connect a model
+Build and test commands use the full Xcode selected by `DEVELOPER_DIR` or `xcode-select`; Command Line Tools and Xcode versions below 27 are rejected. `make build SWIFT_SCRATCH_PATH=/tmp/another-you-swift` and `make test-swift SWIFT_SCRATCH_PATH=/tmp/another-you-swift` keep verification outputs separate from the default `.build` directory. Remove that temporary directory after verification.
 
-1. Start a compatible local model service separately and check the exact model name it serves. For Ollama, `ollama list` lists installed models.
-2. Open **设置 → 本地模型**. Enter the service URL and model name. The usual Ollama URL is `http://127.0.0.1:11434/v1`.
-3. Select **保存并重新连接**, then submit a prompt or generate a draft from a suggestion to test the connection.
+## Use Pi models
 
-Settings opens in a separate macOS window from the sidebar, menu bar, or **⌘,**. It can be minimized or closed while the main window remains usable.
+Settings are split into General, Model, Proactive suggestions, Computer control, Shortcuts, and Software updates. The Model page shows Pi's default model, provider, and thinking level without maintaining separate model or credential settings.
 
-The app does not install models or start their services. Saving settings only validates and writes the configuration; a successful model request is the availability check. The settings UI accepts `localhost`, `127.0.0.1`, and `::1` loopback addresses only.
+1. Configure authentication (`/login`) or a model service in local Pi. Local models also belong in Pi's `models.json` or its local-model setup.
+2. Select a model in Pi's `/model` and press **Ctrl+S** to save the default. Save a default thinking level in `/thinking` if needed.
+3. Click **重新读取 Pi 配置** under Another You's **设置 → 模型**, then send a request to verify the model.
 
-Saving these settings replaces the model section with `provider=local` and `temperature=0.2`, resets privacy to `strict-local`, clears remote-host authorization, and disables `tools.network`. It preserves the content-storage preferences. Remote model settings require manual configuration and a process environment containing the selected key; see [configuration](../../docs/configuration.md). Saving through this local-model UI will overwrite that remote configuration.
+The app reads Pi's `settings.json`, `models.json`, and `auth.json` from `~/.pi/agent`, respecting `PI_CODING_AGENT_DIR`. Legacy Another You `model` settings no longer apply and are never migrated into Pi automatically. Missing defaults or credentials are reported explicitly; loading configuration does not verify a real request. Requests use Pi's native authentication and provider routing.
+
+## Conversations and usage
+
+Quick chat shows a glass capsule input, with removable screenshot previews above it when attached, centered horizontally on the screen containing the pointer, 20% above the bottom of the screen. macOS 26+ uses native Liquid Glass, with a material fallback on older systems. Return or the send shortcut submits and hides it; read replies in the main conversation page.
+
+Open **会话** in the sidebar for a dedicated conversation page. While the app runs, **⌘⇧Space** opens quick chat globally; **⌘Return** sends and **Esc** hides it. Both entry points share sent messages; closing quick chat preserves the conversation. If shortcut registration fails, use the menu entry. Each conversation uses its own latest 20 successful turns as context, separate from other conversations and proposal drafts. The sidecar persists titles, state, and complete message history per conversation; restoration respects content-storage preferences. Screenshot binaries are not persisted or silently resent in later turns.
+
+The home board has **In progress / Completed** columns for conversations and proactive suggestions, with optional grouping by the application associated with a screenshot. Open a conversation to continue it, or a suggestion to review and decide. Item menus support archive and delete. **Settings → Archived conversations** lets you review, restore, or delete archived items. Stop a running conversation before archiving or deleting it; the UI waits for the sidecar acknowledgement.
+
+**Activity** shows individual thinking, execution, command, and application-context stages, with category filters and grouping. Thinking logs contain stage metadata only, never the model’s private reasoning text.
+
+The dashboard pie chart shows model Token shares for **24h / 7d / 15d / 30d**, with input, output, cache, model rankings, reasoning depth, and tool calls. Records begin with this version and remain for 30 days, including reported usage from failures. Missing usage is labeled as unreported, never estimated. Plugin / Skill / MCP appear only when the runtime records such calls; no corresponding connectors are bundled yet.
 
 ## Suggestions and notifications
 
-Suggestions come from app-launch, local-time, and actual Mac idle signals. The client samples idle duration every 30 seconds; it does not read your screen, messages, calendar, or current work. Rule cooldowns and existing unresolved suggestions prevent repeated prompts.
+Suggestions come from app-launch, local-time, and actual Mac idle signals. Idle duration is sampled every 30 seconds. Screenshots and application context are obtained through conversation actions and collectors with the required macOS permissions. Rule cooldowns and existing unresolved suggestions prevent repeated prompts.
 
 Choose **生成草稿**, **稍后**, or **忽略** on a suggestion. Snooze defaults to 15 minutes; due suggestions return while the runtime is running and proactive scheduling is enabled and unpaused. Draft generation changes the suggestion only after the sidecar acknowledges the decision. A failure can be retried manually. **暂停主动建议** survives restarts and does not cancel a model request already submitted.
 
@@ -85,3 +97,7 @@ make clean
 [AgentClient.swift](Sources/AnotherYouCore/AgentClient.swift) owns the process and protocol; [AssistantStore.swift](Sources/AnotherYouCore/AssistantStore.swift) adapts events to UI state and samples idle duration. [AgentSettings.swift](Sources/AnotherYouCore/AgentSettings.swift) owns local settings persistence. [MainWindowView.swift](Sources/AnotherYouCore/MainWindowView.swift) contains the views, and [main.swift](Sources/AnotherYou/main.swift) creates the window, settings scene, and menu bar.
 
 Read [architecture](../../docs/architecture.md), [CLI and JSONL protocol](../../docs/cli-reference.md), and [contributing](../../CONTRIBUTING.md) before changing the Swift/Node boundary.
+
+## Shortcuts, screenshots, and background interaction
+
+[Shortcuts, screenshots, and background interaction](../../docs/desktop-automation.md) covers recording all shortcuts, screenshot previews, macOS permissions, and interaction boundaries.

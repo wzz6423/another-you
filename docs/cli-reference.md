@@ -32,6 +32,8 @@ Send `{"op":"shutdown"}` to stop. EOF, SIGINT, and SIGTERM also stop scheduling 
 | `pause` / `resume` | None | Persist pause state; emit scheduler and Agent status. Pause does not cancel an already submitted model request. |
 | `signal` | `signal`; optional `now` | Ingest a time, event, or idle signal. |
 | `tick` | Optional `now`, `idleForMs` | Restore due snoozed proposals and evaluate time/idle rules. |
+| `contextCapabilities` | `sources` | The host declares available `work` and `notifications` collectors. |
+| `contextResult` | `contextResult` | The host returns an asynchronous result keyed by `requestId`; late or mismatched replies are discarded. |
 | `addRule` | `rule` | Add or replace the rule with the same ID, then persist it. |
 | `removeRule` | `ruleId` | Remove a rule and persist the remaining rules; existing proposals remain. |
 | `shutdown` | None | Stop scheduling, cancel the active request, and exit. |
@@ -40,9 +42,33 @@ Send `{"op":"shutdown"}` to stop. EOF, SIGINT, and SIGTERM also stop scheduling 
 
 `now` and signal `at` values must be valid date strings; include a timezone when supplying them. `idleForMs` is a finite non-negative number. Omit synthetic timestamps in normal operation and report actual measured idle duration. Scheduling is skipped when disabled or paused, including due snoozes; direct prompts and user decisions remain available.
 
-Only one `prompt` or `decide/execute` model request can run at a time. Another such command immediately receives an error; it is not queued. Status, pause/resume, snooze/ignore, and shutdown remain processable. Requests have a 60-second limit and no implicit retry. There is no cancel-only command or token-delta event in this protocol.
+Only one `prompt` or `decide/execute` model request can run at a time. Another such command immediately receives an error; it is not queued. Status, pause/resume, snooze/ignore, and shutdown remain processable. Each model HTTP request has a 60-second deadline; the complete tool loop has a 180-second deadline without implicit retries. `cancel` stops the active model and tools. Token-delta events are not emitted. See the [interaction protocol](desktop-automation.md#protocol-and-verification) for image attachments and native tool replies.
 
 Rule edits and signal/tick commands have no generic acknowledgment event. Query `status` to inspect rule changes; a signal can legitimately produce no suggestion.
+
+## Model configuration and authentication
+
+Each command below carries its own `requestId`:
+
+| `op` | Fields | Behavior |
+| --- | --- | --- |
+| `modelCatalog` | Optional `refresh: true` | Read the local catalog; explicit refresh requests catalogs for configured providers. |
+| `modelSelect` | `provider`, `model`; optional `thinkingLevel` | Save the Pi default model and a supported thinking level. |
+| `modelLogin` | `provider`, `authType: api_key / oauth` | Start an interactive Pi authentication flow. |
+| `modelAuthReply` | Login `requestId`, `promptId`, `value` | Answer the current prompt; invalid or stale prompts do not end the original login. |
+| `modelAuthCancel` | Current operation's `requestId` | Cancel an account operation or catalog refresh. |
+| `modelLogout` | `provider` | Remove the provider's isolated account credential. |
+| `modelImport` | Absolute `path` | Import model definitions and defaults without importing credentials. |
+
+`model.catalog` returns `models`, `providers`, optional `selected`, and `message`. `model.operation` reports `operation` and `state` (`started`, `succeeded`, `failed`, `cancelled`); sending a command does not confirm persistence. `model.auth` carries `requestId`, `provider`, and a `stage` of `prompt`, `promptResolved`, `promptCancelled`, or `notify`. Prompt types follow Pi: `text`, `secret`, `manual_code`, and `select`; selection replies contain the option's `id`.
+
+Configuration changes, login, and refresh are mutually exclusive with each other and with model requests. Local catalog reads remain available. Authentication has a ten-minute deadline; catalog refresh has a twenty-second deadline. EOF, shutdown, or disconnect cancels pending authentication. Authentication content uses only the live transport and never enters the EventBus, conversation, or state history. Real-provider login and model compatibility require separate verification.
+
+## Conversations and activity
+
+`prompt` accepts optional `conversationId`, defaulting to the compatible `default` session. Conversations have isolated context. `conversationAction` requires `conversationId` and `action` (`archive`, `unarchive`, `delete`); running conversations cannot be archived or deleted. Success emits `conversation.updated` with `conversationId`, optional `action`, `conversations`, and `proposals`; failures emit `agent.error` with `conversationId`.
+
+`agent.status.payload.conversations` contains `id`, `title`, optional `appName`, `createdAt`, `updatedAt`, `state`, and `archived`; messages are returned by the on-demand read protocol below. Restart persistence respects `privacy.storePrompts` / `privacy.storeResponses`; screenshot binaries are not persisted. `agent.activity` contains only `category` (`thinking`, `execution`, `command`, `context`), `phase` (`started`, `completed`, `failed`), optional `toolName`, and `source`. It does not transmit thinking text or command arguments.
 
 ## Input examples
 
@@ -101,15 +127,18 @@ Every event has `id`, `occurredAt` (ISO timestamp), `kind`, `source`, and `paylo
 
 | `kind` | Main payload fields |
 | --- | --- |
-| `agent.status` | `configPath`, `paused`, `schedulerEnabled`, `model`, `rules`, `proposals`, `history` |
+| `agent.status` | `configPath`, `paused`, `schedulerEnabled`, `model`, `proactive`, `rules`, `proposals`, `history`, `usageRecords` |
 | `scheduler.status` | `running`, and where supplied `paused` |
+| `proactive.status` | `taskId`, `running`, `tasks`, `sources`, `intervals` |
+| `context.request` / `context.cancel` | `requestId`, `source`; request or cancel work/notification collection |
 | `proactive.suggestion` | `suggestionId`, `ruleId`, `title`, `message`, `summary`, `reason`, `createdAt`, `state`, `trigger`, `context`, `signal` |
 | `agent.request` | `requestId`, `prompt` |
+| `agent.usage` | `source`, `model`, `outcome`, optional `usage`, `reasoningEffort`, `toolCalls` |
 | `agent.response` | `requestId`, `text`, `model` |
 | `proposal.updated` | `suggestionId`, `decision`, `state`; optional `text`, `snoozedUntil` |
 | `agent.error` | `message`; when applicable `requestId` or `suggestionId` |
 
-`scheduler.signal` exists in the event type union but is not emitted by the current default command flow. Status is emitted after a model task finishes, including on failure. The model status contains `configured`, `available`, `endpoint`, `model`, and `message`; their meanings are in [configuration](configuration.md).
+`scheduler.signal` exists in the event type union but is not emitted by the current default command flow. Status is emitted after a model task finishes, including on failure. The model status contains `configured`, `available`, `endpoint`, `model`, `provider`, `reasoningEffort`, `configDirectory`, and `message`; their meanings are in [configuration](configuration.md).
 
 Use `payload.suggestionId` as the stable suggestion identity. An envelope `id` identifies that individual event, so it must not be used to create a second card when a snoozed suggestion returns. In a status snapshot, each proposal uses `id` and has `ruleId`, `title`, `summary`, `reason`, `createdAt`, `state`, `context`, and optional `text`/`snoozedUntil`.
 
@@ -125,3 +154,12 @@ Use `payload.suggestionId` as the stable suggestion identity. An envelope `id` i
 | `failed` | Generation failed or was interrupted; the user may retry, snooze, or ignore. |
 
 `execute` emits `running`, then `completed` with text or `failed` with error text. A failure also emits `agent.error`. Clients must use these events or a later status snapshot to determine success. There is no automatic retry after a restart. See [architecture](architecture.md) for the end-to-end flow and [configuration](configuration.md) for persistence limits.
+
+Usage records are retained separately for 30 days. `usage` contains `inputTokens`, `outputTokens`, `cacheReadTokens`, `cacheWriteTokens`, and `totalTokens`; it is omitted when unreported. `outcome` is `completed` or `failed`; reported usage from failures is included. Each `toolCalls` item contains `name` and `kind` (`tool` / `plugin` / `skill` / `mcp`). Built-in file, shell, and network tools produce real records; unconnected extensions do not. Main conversations carry their latest 20 successful turns separately from proposals and do not restore after restart.
+
+
+### On-demand conversation reads and large events
+
+The `conversations` fields in `agent.status` and `conversation.updated` contain summaries without message arrays. Opening one sends `{"op":"conversationRead","conversationId":"…","readId":"…"}`; `conversation.messages` returns the same IDs and a complete `conversation`. Read responses are not recorded as activity, and clients ignore responses for stale `readId` values.
+
+Small events remain one JSON line. `encodeEvent` transparently splits events exceeding 3 MiB of UTF-8 into `protocol.chunk` envelopes. Their payload contains `eventId`, zero-based `index`, `total`, and base64 `data` (up to 128 KiB of original bytes per chunk). The host dispatches only the reconstructed event, rejecting out-of-order, duplicate, or over-64-MiB assemblies. Incomplete events are not dispatched; a subsequent complete event or new chunk sequence can recover. Frame limits do not truncate saved content.

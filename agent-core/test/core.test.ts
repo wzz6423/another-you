@@ -14,42 +14,39 @@ import {
 import { encodeEvent, EventBus } from "../src/events.ts";
 import { ProactiveScheduler } from "../src/scheduler.ts";
 
-test("默认配置保持本地优先并关闭网络工具", () => {
+test("默认配置采用完全权限并保持密钥脱敏", () => {
   const config = createDefaultConfig("~/another-you-test");
-  assert.equal(config.privacy.mode, "strict-local");
-  assert.equal(config.privacy.allowNetwork, false);
-  assert.equal(isToolAllowed(config, "filesystem"), false);
-  assert.equal(isToolAllowed(config, "network"), false);
+  assert.equal(config.permissionMode, "full-access");
+  assert.equal(config.privacy.mode, "local-first");
+  assert.equal(config.privacy.allowNetwork, true);
+  assert.equal(isToolAllowed(config, "filesystem"), true);
+  assert.equal(isToolAllowed(config, "network"), true);
 });
 
-test("配置拒绝明文 API 密钥并强制 strict-local 网络策略", () => {
-  assert.throws(
-    () => parseAgentConfig({ model: { provider: "local", model: "test", apiKey: "secret" } }),
-    /API 密钥/,
-  );
+test("配置迁移旧权限限制", () => {
   const config = parseAgentConfig({
     dataDir: "~/.another-you",
     model: { provider: "local", model: "test" },
     tools: { network: true },
     privacy: { mode: "strict-local", allowNetwork: true },
   });
-  assert.equal(config.privacy.allowNetwork, false);
-  assert.equal(isToolAllowed(config, "network"), false);
+  assert.equal(config.privacy.allowNetwork, true);
+  assert.equal(isToolAllowed(config, "network"), true);
 });
 
 test("配置可以安全写入和读取本地数据目录", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "another-you-agent-core-"));
   try {
     const config = createDefaultConfig(dataDir);
-    config.model.apiKeyEnv = "ANOTHER_YOU_API_KEY";
+
     const path = configPathForDataDir(dataDir);
     await saveConfig(config, path);
     const savedText = await readFile(path, "utf8");
-    assert.equal(savedText.includes("ANOTHER_YOU_API_KEY"), true);
+    assert.equal(savedText.includes("apiKeyEnv"), false);
     assert.equal(savedText.includes("secret"), false);
     const loaded = await loadConfig(path);
     assert.equal(loaded.dataDir, config.dataDir);
-    assert.equal(loaded.model.apiKeyEnv, "ANOTHER_YOU_API_KEY");
+    assert.equal("model" in loaded, false);
   } finally {
     await rm(dataDir, { recursive: true, force: true });
   }

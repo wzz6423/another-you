@@ -6,23 +6,25 @@ A private, local-first personal AI assistant for macOS. It suggests a next step 
 
 SwiftUI provides the native window, menu bar, and settings. A Node sidecar manages rules, local state, and model requests through the official Pi SDK. The app and website currently use Chinese; these project documents are available in both languages.
 
-**Status: 0.1.0 development preview.** The GitHub and Gitee repositories are private and require access. There is no public installer or automatic update channel.
+**Status: 0.1.0 development preview.** The GitHub and Gitee repositories are open source. In-app updates and release tooling are implemented; the first public installer and Homebrew cask have not been published.
 
 ## What it does
 
 | Capability | Current behavior |
 | --- | --- |
 | Proactive suggestions | Rules respond to app launch, local time, and the Mac's actual idle duration, with reasons, cooldowns, and deduplication. |
+| Proactive work analysis | By default, accessible work-window content is checked every 5 minutes and accessible notification content every 3 minutes. Subagents analyze changes; a parent agent synthesizes every 10 minutes, with at least a 15-minute suggestion cooldown. |
 | User decisions | Generate a reviewable draft, snooze for 15 minutes, ignore, or pause proactive suggestions. Decisions and pause state survive restarts. |
 | Model requests | Connect to a local OpenAI-compatible service; explicitly authorized remote services are supported through configuration. |
 | Native notifications | Opt in from a packaged `.app`; new suggestions can notify you while the app is inactive and macOS permission is granted. |
+| Software updates | Configured release apps support checks, automatic downloads, and installation after the current task finishes; online updates are disabled in development builds. |
 | Local records | Keep suggestion states and a bounded activity history, with configurable content storage and basic credential redaction. |
 
-The preview has no Calendar, Mail, Notes, or screen-content connector. Models have no file, shell, or message-sending tools. A draft does not perform an external action. Suggestions come from rules; their appearance does not prove that a model is available. Each model request is a separate turn, without automatic conversation memory.
+User-triggered screenshots, application context, computer interaction, and an independent headless browser are available; see the [interaction guide](docs/desktop-automation.md) for permissions and limits. Proactive analysis reads only the currently accessible work window and notification-center content through macOS Accessibility; it does not take screenshots or read files, and reports permission or unavailable-source states explicitly. Models also have file, shell, and network tools. Suggestions do not establish model availability. The current process retains the latest 20 successful conversation turns as subsequent context. Calendar, Mail, and Notes have no dedicated connectors.
 
 ## Get started
 
-You need macOS 14+, a Swift 6 toolchain, and Node.js 22.19+ with npm. A compatible local model service and an already installed model are needed for drafting, but not for viewing rule-based suggestions. Python 3 is only needed for the website preview.
+The app runs on macOS 14+. Building from source requires full Xcode 27+ with the macOS 27+ SDK, and Node.js 22.19+ with npm. A compatible local model service and an already installed model are needed for drafting, but not for viewing rule-based suggestions. Python 3 is needed for packaging, release tests, and the website preview.
 
 From the repository root:
 
@@ -31,7 +33,7 @@ make deps
 make run
 ```
 
-`make run` builds and starts `dist/dev/Another You.app`. In **设置 → 本地模型**, enter the service address and the exact installed model name, then choose **保存并重新连接**. For Ollama, the usual address is `http://127.0.0.1:11434/v1`; `ollama list` shows installed model names. Another You does not install a model or start its server.
+`make run` builds and starts `dist/dev/Another You.app`. Configure models, including local models, in Pi. Press Ctrl+S in Pi’s `/model` picker to save the default, then click **重新读取 Pi 配置** under **设置 → 模型**. Another You uses Pi’s authentication and model settings directly.
 
 A saved configuration is not a connection test. Submit a prompt or approve a draft to verify your model; failures appear in the app.
 
@@ -50,7 +52,8 @@ Run `make help` for the available targets.
 | --- | --- |
 | `make build` | Build the Swift executable. |
 | `make check` | Check TypeScript, website JavaScript, and shell syntax. |
-| `make test` | Run Agent, Swift, and development-script tests. |
+| `make test` | Run Agent, Swift, development-script, and release-tool tests. |
+| `make test-release` | Verify release signatures, metadata, and the two-host upload flow. |
 | `make build-package` | Build a separate development `.app` in `dist/macos`. |
 | `make website` | Serve the static website at `http://127.0.0.1:4173`. |
 | `make pi-source` | Fetch the pinned upstream source into `agent-core/.cache/pi`. |
@@ -86,3 +89,5 @@ Read the [contribution guide](CONTRIBUTING.md), [code of conduct](CODE_OF_CONDUC
 ## License
 
 [MIT](LICENSE). Third-party dependencies retain their own licenses; see [sources](docs/sources.md).
+
+[Shortcuts, screenshots, and background interaction](docs/desktop-automation.md)

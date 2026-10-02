@@ -1,0 +1,54 @@
+import SwiftUI
+
+@MainActor
+struct ActivityLogView: View {
+    @Environment(\.locale) private var interfaceLocale
+    @ObservedObject var store: AssistantStore
+    @State private var category: ActivityCategory = .all
+    @State private var grouped = false
+    private var events: [AgentEvent] {
+        store.activityHistory.filter { category == .all || $0.activityCategory == category }
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                HStack {
+                    Text(AppLocalization.text("活动记录")).font(.title2.bold())
+                    Spacer()
+                    Toggle(AppLocalization.text("按类型分组"), isOn: $grouped).toggleStyle(.checkbox).font(.caption)
+                    Picker(AppLocalization.text("筛选"), selection: $category) {
+                        ForEach(ActivityCategory.allCases) { Text($0.title(locale: interfaceLocale)).tag($0) }
+                    }.frame(width: 190)
+                }
+                if events.isEmpty { Text(AppLocalization.text("还没有活动记录。")).foregroundStyle(.secondary).font(.callout) }
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    if grouped {
+                        ForEach(ActivityCategory.allCases.filter { $0 != .all }) { category in
+                            let rows = events.filter { $0.activityCategory == category }
+                            if !rows.isEmpty {
+                                Text(category.title(locale: interfaceLocale)).font(.subheadline.bold()).padding(.vertical, 12)
+                                ForEach(rows) { row($0) }
+                            }
+                        }
+                    } else { ForEach(events) { row($0) } }
+                }
+            }.padding(30).frame(maxWidth: 980).frame(maxWidth: .infinity, alignment: .topLeading)
+        }.background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private func row(_ event: AgentEvent) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: event.activityCategory?.icon ?? "circle").foregroundStyle(.secondary).frame(width: 18)
+            VStack(alignment: .leading, spacing: 5) {
+                Text(event.activityTitle(locale: interfaceLocale)).font(.system(size: 12, weight: .medium))
+                if let detail = event.payload["toolName"]?.string ?? event.payload["message"]?.string ?? event.payload["text"]?.string ?? event.payload["prompt"]?.string {
+                    Text(detail).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(3).textSelection(.enabled)
+                }
+            }
+            Spacer(minLength: 8)
+            Text(event.date.map { AppLocalization.date($0) } ?? "").font(.caption2).foregroundStyle(.secondary)
+        }.padding(.vertical, 12).frame(maxWidth: .infinity, alignment: .leading)
+            .overlay(alignment: .bottom) { Divider() }
+    }
+}
