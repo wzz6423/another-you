@@ -5,22 +5,45 @@ import SwiftUI
 struct ConversationView: View {
     @Environment(\.locale) private var interfaceLocale
     @ObservedObject var store: AssistantStore
-    @ObservedObject private var shortcuts = ShortcutStore.shared
     var focusRequest: UUID? = nil
     var onSettings: (() -> Void)? = nil
-    @Environment(\.openWindow) private var openWindow
+    var onBack: (() -> Void)? = nil
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
-                Text(AppLocalization.text("会话")).font(.system(size: 22, weight: .semibold, design: .rounded))
+                if let onBack {
+                    Button(AppLocalization.text("返回会话看板"), systemImage: "chevron.backward", action: onBack)
+                        .labelStyle(.iconOnly).help(AppLocalization.text("返回会话看板"))
+                        .disabled(store.hasPendingPrompt || !store.pendingConversationActions.isEmpty)
+                }
+                Text(store.sessions.first { $0.id == store.selectedConversationID }?.title ?? AppLocalization.text("会话"))
+                    .font(.system(size: 22, weight: .semibold, design: .rounded)).lineLimit(1)
                 Spacer()
-                Button(AppLocalization.text("新会话"), systemImage: "plus") { store.newConversation() }.disabled(store.hasPendingPrompt)
-                Text(AppLocalization.text("%@ 快速呼起", shortcuts.label(for: .quickChat))).font(.caption).foregroundStyle(.secondary)
+                ConversationExportButton(store: store)
+                Button(AppLocalization.text("创建分支"), systemImage: "arrow.triangle.branch") { store.forkConversation() }
+                    .disabled(!store.canForkConversation)
+            }
+            if let origin = store.sessions.first(where: { $0.id == store.selectedConversationID })?.forkedFrom {
+                HStack {
+                    Text(AppLocalization.text("分支会话")).font(.caption).foregroundStyle(.secondary)
+                    if store.sessions.contains(where: { $0.id == origin.conversationID }) {
+                        Button(AppLocalization.text("查看来源会话")) { store.selectConversation(origin.conversationID) }
+                            .font(.caption).disabled(store.hasPendingPrompt || !store.pendingConversationActions.isEmpty)
+                    }
+                }
             }
             if store.isLoadingConversation { ProgressView(AppLocalization.text("正在读取会话…")).controlSize(.small) }
-            if let error = store.conversationActionError { Text(error).font(.caption).foregroundStyle(.red) }
+            if let error = store.conversationActionError {
+                HStack {
+                    Text(error).font(.caption).foregroundStyle(.red)
+                    if let id = store.selectedConversationID {
+                        Button(AppLocalization.text("重试")) { store.selectConversation(id) }
+                            .disabled(store.hasPendingPrompt || !store.pendingConversationActions.isEmpty)
+                    }
+                }
+            }
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 14) {
@@ -29,7 +52,14 @@ struct ConversationView: View {
                                 .font(.system(size: 13)).foregroundStyle(.secondary).padding(.vertical, 24)
                         }
                         ForEach(store.conversation) { message in
-                            ConversationMessageRow(message: message).equatable()
+                            VStack(alignment: .leading, spacing: 6) {
+                                ConversationMessageRow(message: message).equatable()
+                                Button(AppLocalization.text("从此处分支"), systemImage: "arrow.triangle.branch") {
+                                    store.forkConversation(through: message.id)
+                                }
+                                .font(.caption).buttonStyle(.borderless).foregroundStyle(.secondary)
+                                .disabled(!store.canForkConversation || message.isPending)
+                            }
                                 .id(message.id)
                                 .transition(.opacity)
                         }
@@ -42,19 +72,14 @@ struct ConversationView: View {
                     }
                 }
             }
-            if !store.isConnected || !store.modelConfigured {
-                HStack {
-                    Text(store.isConnected ? AppLocalization.text("请在设置中选择模型并配置账户") : store.connection.label)
-                        .font(.caption).foregroundStyle(.secondary)
-                    Spacer()
-                    Button(AppLocalization.text("模型设置")) {
-                        if let onSettings { onSettings() } else { openWindow(id: "settings") }
-                    }
-                    if !store.isConnected { Button(AppLocalization.text("重新连接")) { store.refresh() }.disabled(store.connection == .starting || store.isRestarting) }
-                }
-            }
+            ConversationModelNotice(store: store, onSettings: onSettings)
             if store.selectedConversationArchived {
-                Text(AppLocalization.text("已归档会话，可在设置中恢复。")).font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    Text(AppLocalization.text("已归档会话")).font(.caption).foregroundStyle(.secondary)
+                    Button(AppLocalization.text("恢复会话")) {
+                        if let id = store.selectedConversationID { store.manageConversation(id, action: "unarchive") }
+                    }.disabled(!store.isConnected || !store.pendingConversationActions.isEmpty)
+                }
             } else { ConversationComposer(store: store, focusRequest: focusRequest) }
         }
         .padding(24).frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -63,7 +88,31 @@ struct ConversationView: View {
 }
 
 @MainActor
-private struct ConversationComposer: View {
+struct ConversationModelNotice: View {
+    @Environment(\.locale) private var interfaceLocale
+    @ObservedObject var store: AssistantStore
+    var onSettings: (() -> Void)? = nil
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        if !store.isConnected || !store.modelConfigured {
+            HStack {
+                Text(store.isConnected ? AppLocalization.text("请在设置中选择模型并配置账户") : store.connection.label)
+                    .font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button(AppLocalization.text("模型设置")) {
+                    if let onSettings { onSettings() } else { openWindow(id: "settings") }
+                }
+                if !store.isConnected {
+                    Button(AppLocalization.text("重新连接")) { store.refresh() }.disabled(store.connection == .starting || store.isRestarting)
+                }
+            }.padding(.bottom, 10)
+        }
+    }
+}
+
+@MainActor
+struct ConversationComposer: View {
     @Environment(\.locale) private var interfaceLocale
     @ObservedObject var store: AssistantStore
     @ObservedObject private var draft: InputDraft
@@ -85,13 +134,6 @@ private struct ConversationComposer: View {
         VStack(alignment: .trailing, spacing: 10) {
             CaptureAttachmentsView(session: desktop)
             HStack {
-                Menu {
-                    Button(AppLocalization.text("截取区域")) { desktop.capture(.region) }
-                    Button(AppLocalization.text("当前应用窗口")) { desktop.capture(.window) }
-                    Button(AppLocalization.text("整个屏幕")) { desktop.capture(.screen) }
-                } label: { Label(desktop.isCapturing ? AppLocalization.text("正在截图…") : AppLocalization.text("截图"), systemImage: "camera") }
-                .fixedSize()
-                .disabled(updates.isInstalling || desktop.isCapturing || desktop.attachments.count >= 4)
                 Toggle(AppLocalization.text("允许前台控制"), isOn: $desktop.allowForeground)
                     .toggleStyle(.checkbox).font(.caption)
                     .help(AppLocalization.text("开启后，电脑操作可能移动鼠标、输入文字或切换应用。默认使用后台操作。"))
@@ -110,9 +152,9 @@ private struct ConversationComposer: View {
             Button(store.hasPendingPrompt ? AppLocalization.text("正在生成") : AppLocalization.text("发送"), systemImage: "arrow.up") {
                 if store.ask(prompt) { store.setInputDraft("", for: .conversation); inputFocused = true }
             }
-            .buttonStyle(.borderedProminent).tint(.indigo).controlSize(.small)
+            .buttonStyle(.borderedProminent).tint(.blue).controlSize(.small)
             .appShortcut(.sendMessage)
-            .disabled((prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && desktop.attachments.isEmpty) || !store.isConnected || !store.modelConfigured || store.hasPendingPrompt || store.isLoadingConversation || updates.isInstalling)
+            .disabled((prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && desktop.attachments.isEmpty) || !store.isConnected || !store.modelConfigured || store.hasPendingPrompt || store.isLoadingConversation || updates.isInstalling || !store.pendingConversationActions.isEmpty || (store.selectedConversationID != nil && store.conversationActionError != nil))
         }
         .padding(16).background(.background, in: RoundedRectangle(cornerRadius: 16))
         .onAppear { inputFocused = true }

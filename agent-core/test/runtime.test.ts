@@ -237,6 +237,8 @@ test("JSONL 子进程完成建议、prompt、错误和重启恢复闭环", async
   const server = await modelServer(t);
   const config = await configFor(t, server.endpoint);
   const proc = await childCore(t, config);
+  proc.send({ op: "addRule", rule: eventRule });
+  proc.send({ op: "signal", signal: { type: "event", name: "test" } });
   const suggestion = await proc.wait((event) => event.kind === "proactive.suggestion");
   const id = suggestion.payload.suggestionId;
   proc.send({ op: "decide", suggestionId: id, decision: "execute" });

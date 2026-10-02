@@ -18,13 +18,13 @@ While the app is running, Settings → Shortcuts lets users record, clear, or re
 | Stop current task | Command-period |
 | Close quick chat | Escape |
 
-The first four bindings are global. Others apply within the relevant application interface. Menu and button actions remain available after clearing a binding.
+The first four bindings are global. Others apply within the relevant application interface. Quick chat remains available from the menu after clearing its binding.
 
 Press and release Control-Option to capture the current external application window. Pressing another key during the chord cancels capture. This modifier-only global listener requires Accessibility permission and can be remapped; existing custom bindings are preserved.
 
 ## Screenshots and application context
 
-Capture a region, application window, or screen from a global shortcut or the conversation's screenshot menu. Global capture remembers the target before opening quick chat; the composer uses the most recent external application. Interactive region capture requires a user selection and supports Escape to cancel. ScreenCaptureKit captures screens and windows.
+Use the global shortcuts to attach an application or screen snapshot: Control-Option captures the foreground application window, and the region and screen shortcuts capture their respective targets. Capture remembers the target before opening quick chat and adds a removable attachment preview to the composer. Interactive region capture requires a user selection and supports Escape to cancel. ScreenCaptureKit captures screens and windows.
 
 Grant Screen Recording in Settings → Computer interaction. Accessibility access supplies the target application's window title, text, and actionable controls. Without it, only basic application metadata is available; some apps expose limited context. Missing permissions produce an error rather than bypassing macOS authorization.
 

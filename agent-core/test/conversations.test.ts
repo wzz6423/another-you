@@ -97,6 +97,7 @@ test("分类日志逐条接收真实执行回调并跨重启保持", async t => 
   assert.equal(logs.length, 7);
   assert.deepEqual(logs.map(event => event.payload.category), ["execution", "thinking", "thinking", "command", "command", "context", "execution"]);
   assert.equal(logs.every(event => event.payload.text === undefined && event.payload.arguments === undefined), true);
+  assert.equal(logs.every(event => event.payload.conversationId === "default" && event.payload.requestId === "logs"), true);
 });
 
 test("主动建议也可归档删除，归档后的稍后提醒不重新出现", async t => {
@@ -182,4 +183,67 @@ test("第 101 轮后完整历史仍持久化并可读取，模型上下文只取
   assert.equal(loaded?.messages.length, 101);
   assert.equal(loaded?.messages[0].prompt, "消息 1");
   assert.equal(loaded?.messages.at(-1)?.response, "回复 消息 101");
+  restored.forkConversation("long-session", "fork-all");
+  assert.equal(sessions(restored).at(-1)?.messages.length, 101);
+});
+
+test("逐轮分支复制完整前缀，源会话不变，不重复计费且重启后独立续聊", async t => {
+  let context: unknown;
+  const { core, config, backend } = await fixture(t, async request => {
+    context = request.context?.conversation;
+    return { text: `回复 ${request.prompt}` };
+  });
+  await core.prompt("one", "第一轮", undefined, false, "source");
+  await core.prompt("two", "第二轮", undefined, false, "source");
+  const source = structuredClone(sessions(core)[0]);
+  const usage = core.status().usageRecords;
+  const history = core.status().history;
+  const events: AgentEvent[] = [];
+  core.events.subscribe(event => events.push(event));
+  core.forkConversation("source", "fork-request", "one");
+  const receipt = events.at(-1)!;
+  assert.equal(receipt.kind, "conversation.updated");
+  assert.equal(receipt.payload.action, "fork");
+  assert.equal(receipt.payload.sourceConversationId, "source");
+  assert.equal(receipt.payload.requestId, "fork-request");
+  const id = receipt.payload.conversationId as string;
+  assert.notEqual(id, "source");
+  assert.deepEqual(sessions(core)[0], source);
+  assert.deepEqual(core.status().usageRecords, usage);
+  assert.deepEqual(core.status().history, history);
+  const restored = new AgentCore({ config, backend, rules: [] });
+  const fork = sessions(restored).find(session => session.id === id)!;
+  assert.deepEqual(fork.forkedFrom, { conversationId: "source", messageId: "one" });
+  assert.deepEqual(fork.messages, source.messages.slice(0, 1));
+  await restored.prompt("branch-turn", "分支新输入", undefined, false, id);
+  assert.deepEqual(context, [{ role: "user", content: "第一轮" }, { role: "assistant", content: "回复 第一轮" }]);
+  assert.deepEqual(sessions(restored).find(session => session.id === "source"), source);
+  assert.equal(sessions(restored).find(session => session.id === id)?.messages.length, 2);
+});
+
+test("分支失败不留下幽灵会话；错误起点、运行中与非法请求被拒绝", async t => {
+  let resolve!: (response: { text: string }) => void;
+  const { core, directory } = await fixture(t, async () => new Promise(done => { resolve = done; }));
+  const running = core.prompt("one", "第一轮", undefined, false, "source");
+  while (!resolve) await new Promise(done => setImmediate(done));
+  assert.throws(() => core.forkConversation("source", "request"), /停止/);
+  resolve({ text: "完成" });
+  await running;
+  assert.throws(() => core.forkConversation("source", "request", "missing"), /起点/);
+  assert.throws(() => core.forkConversation("source", ""), /requestId/);
+  core.manageConversation("source", "archive");
+  core.forkConversation("source", "archive-fork");
+  assert.equal(sessions(core)[1].archived, false);
+  const before = sessions(core);
+  const path = join(directory, "state.json");
+  const original = await readFile(path);
+  await rm(path);
+  await mkdir(path);
+  const events: AgentEvent[] = [];
+  core.events.subscribe(event => events.push(event));
+  assert.throws(() => core.forkConversation("source", "failed-fork"));
+  assert.deepEqual(sessions(core), before);
+  assert.equal(events.length, 0);
+  await rm(path, { recursive: true });
+  await writeFile(path, original);
 });

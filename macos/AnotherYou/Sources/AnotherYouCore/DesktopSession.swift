@@ -76,6 +76,11 @@ public final class DesktopSession: ObservableObject {
 
     public func removeAttachment(_ id: UUID) { attachments.removeAll { $0.id == id } }
     public func clearAttachments() { attachments.removeAll() }
+    func replaceAttachments(_ values: [ScreenAttachment]) {
+        captureTask?.cancel()
+        attachments = values
+        error = nil
+    }
     public func refreshPermissions() { permissions = desktop.capabilities }
     public func requestPermission(_ name: String) async {
         do { permissions = try await desktop.handle(["action": .string("requestPermissions"), "permission": .string(name)]) }

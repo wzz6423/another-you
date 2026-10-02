@@ -99,7 +99,7 @@ Work and notification tasks run separately; content fingerprints, notification d
 
 ## What state retains
 
-State includes rules, pause state, proposal states, cooldown timestamps, hashed deduplication keys, up to 200 history events, separate `usageRecords` retained for 30 days (tokens, model, reasoning depth, tool calls, and outcome), and up to 100 completed/ignored proposals in total. Pending, running, snoozed, and failed proposals remain retained. Status events are not added to the history. An interrupted running proposal becomes failed on restart and is not automatically retried.
+State includes rules, pause state, proposal states, cooldown timestamps, hashed deduplication keys, history events retained for 30 days by event time without a record-count cap, separate `usageRecords` retained for 30 days (tokens, model, reasoning depth, tool calls, and outcome), and up to 100 completed/ignored proposals in total. Invalid history timestamps are discarded; future events remain stored but are excluded from the activity view until their time arrives, matching usage filtering. Previously truncated events cannot be recovered. Pending, running, snoozed, and failed proposals remain retained. Status events are not added to the history. An interrupted running proposal becomes failed on restart and is not automatically retried.
 
 - `storePrompts=false` removes `prompt`, `context`, and `signal` from persisted history, clears proposal context, and removes rule context. Rule titles/messages and proposal titles/summaries remain; this is not a switch that erases every piece of user text.
 - `storeResponses=false` removes history and proposal `text` fields.

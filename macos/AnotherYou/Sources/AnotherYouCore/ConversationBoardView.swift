@@ -21,14 +21,21 @@ struct ConversationBoardView: View {
     @Environment(\.locale) private var interfaceLocale
     @ObservedObject var store: AssistantStore
     var archived = false
+    var includesArchived = false
     var onOpen: (() -> Void)? = nil
     @AppStorage("AnotherYou.Board.GroupByApplication") private var groupByApplication = false
     @State private var selectedProposal: ProactiveCard?
     @State private var previewSession = false
+    @State private var archiveExpanded = false
 
     private var entries: [BoardEntry] {
         (store.sessions.map { BoardEntry(session: $0) } + store.cards.map { BoardEntry(proposal: $0) })
             .filter { $0.archived == archived }.sorted { $0.date > $1.date }
+    }
+
+    private var archivedEntries: [BoardEntry] {
+        (store.sessions.map { BoardEntry(session: $0) } + store.cards.map { BoardEntry(proposal: $0) })
+            .filter(\.archived).sorted { $0.date > $1.date }
     }
 
     var body: some View {
@@ -40,12 +47,23 @@ struct ConversationBoardView: View {
             }
             if let error = store.conversationActionError { Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled) }
             if archived {
-                entryList(entries)
+                entryList(entries, isArchive: true)
             } else {
                 HStack(alignment: .top, spacing: 14) {
                     column(AppLocalization.text("进行中"), entries: entries.filter { !$0.completed })
                     column(AppLocalization.text("已完成"), entries: entries.filter(\.completed))
                 }
+            }
+            if includesArchived {
+                DisclosureGroup(isExpanded: $archiveExpanded) {
+                    entryList(archivedEntries, isArchive: true).padding(.top, 12)
+                } label: {
+                    HStack {
+                        Text(AppLocalization.text("已归档会话")).font(.subheadline.bold())
+                        Text(AppLocalization.number(archivedEntries.count)).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.top, 12)
             }
         }
         .sheet(item: $selectedProposal) { proposal in
@@ -76,10 +94,10 @@ struct ConversationBoardView: View {
         }.frame(maxWidth: .infinity, alignment: .topLeading)
     }
 
-    private func entryList(_ entries: [BoardEntry]) -> some View {
+    private func entryList(_ entries: [BoardEntry], isArchive: Bool = false) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             if entries.isEmpty {
-                Text(AppLocalization.text(archived ? "暂无已归档会话" : "暂无会话"))
+                Text(AppLocalization.text(isArchive ? "暂无已归档会话" : "暂无会话"))
                     .font(.caption).foregroundStyle(.secondary).padding(20).frame(maxWidth: .infinity, alignment: .leading)
             }
             ForEach(groupByApplication ? Array(Set(entries.map(\.appName))).sorted() : [""], id: \.self) { group in
@@ -114,6 +132,9 @@ struct ConversationBoardView: View {
                     .accessibilityLabel(AppLocalization.text("会话操作"))
             }
             HStack(spacing: 6) {
+                if entry.session?.forkedFrom != nil {
+                    Image(systemName: "arrow.triangle.branch").help(AppLocalization.text("分支会话"))
+                }
                 if entry.running { ProgressView().controlSize(.mini) }
                 Text(entry.stateLabel).font(.caption).foregroundStyle(.secondary)
                 Spacer()

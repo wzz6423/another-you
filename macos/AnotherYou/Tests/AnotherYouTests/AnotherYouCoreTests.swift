@@ -275,7 +275,8 @@ final class AssistantStoreTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: directory) }
         let client = TestAgentClient()
         let store = AssistantStore(client: client, repository: AgentSettingsRepository(dataDirectory: directory))
-        let suggestion = event("proactive.suggestion", id: "s1", payload: ["title": .string("实际建议")])
+        let suggestion = AgentEvent(id: "s1", occurredAt: ISO8601DateFormatter().string(from: Date()), kind: "proactive.suggestion",
+                                    source: "system", payload: ["title": .string("实际建议")])
         client.emit(suggestion)
         let historyValue = try JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode(suggestion))
         client.emit(event("agent.status", payload: [

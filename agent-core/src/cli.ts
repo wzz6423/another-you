@@ -20,6 +20,7 @@ interface StdioCommand extends ModelCommand {
   requestId?: string;
   readId?: string;
   conversationId?: string;
+  messageId?: string;
   action?: string;
   prompt?: string;
   suggestionId?: string;
@@ -84,6 +85,7 @@ async function main(): Promise<void> {
         else if (command.op === "removeRule" && command.ruleId) core.removeRule(command.ruleId);
         else if (command.op === "conversationRead" && command.conversationId && command.readId) core.readConversation(command.conversationId, command.readId);
         else if (command.op === "conversationAction" && command.conversationId && command.action) { core.manageConversation(command.conversationId, command.action); status(); }
+        else if (command.op === "conversationFork" && command.conversationId && command.requestId) core.forkConversation(command.conversationId, command.requestId, command.messageId);
         else if (command.op === "status") { await backend.reloadModelConfiguration(); status(); }
         else if (command.op === "contextCapabilities") { core.registerContextSources(command.sources); status(); }
         else if (command.op === "contextResult" && command.contextResult) core.receiveContext(command.contextResult);
