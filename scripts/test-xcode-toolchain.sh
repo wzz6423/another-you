@@ -49,7 +49,13 @@ cat > "${test_dir}/bin/xcodebuild" <<'XCODE'
 #!/usr/bin/env bash
 set -euo pipefail
 [[ "$1" == -version && -n "$DEVELOPER_DIR" ]]
-printf 'Xcode %s\nBuild version 27A266a\n' "$ANOTHER_YOU_FIXTURE_XCODE_VERSION"
+printf 'Xcode %s\n' "$ANOTHER_YOU_FIXTURE_XCODE_VERSION"
+if [[ "${ANOTHER_YOU_FIXTURE_XCODE_CHUNKED:-0}" == 1 ]]; then
+  # 后续输出超过管道容量，确保提前关闭读取端会让生产者失败。
+  printf '%1048576s\n' 'Build version 27A266a'
+else
+  printf 'Build version 27A266a\n'
+fi
 XCODE
 cat > "${test_dir}/bin/xcrun" <<'XCRUN'
 #!/usr/bin/env bash
@@ -97,6 +103,11 @@ run_toolchain || fail '所选完整 Xcode 27 应可用'
 [[ "$(cat "${test_dir}/stdout")" == "$fixture_developer" ]] || fail '无参数 stdout 只能包含 Developer 目录'
 [[ -s "${test_dir}/stderr" ]] || fail '工具链诊断应写入 stderr'
 pass '接受完整 Xcode 27，stdout 与诊断分离'
+
+ANOTHER_YOU_FIXTURE_XCODE_CHUNKED=1 run_toolchain --version || fail '分段版本输出不应因读取端提前退出而失败'
+printf '%s\n' "$fixture_developer" "$fixture_sdk" --version > "${test_dir}/expected"
+cmp -s "${test_dir}/expected" "${test_dir}/invocation" || fail '读取完整版本输出后应执行 Swift'
+pass '消费完整的分段版本输出，避免生产者 Broken pipe'
 
 DEVELOPER_DIR="$fixture_app" ANOTHER_YOU_FIXTURE_SELECTED=/Library/Developer/CommandLineTools run_toolchain || fail '显式 .app 应优先于 xcode-select'
 [[ "$(cat "${test_dir}/stdout")" == "$fixture_developer" ]] || fail '.app 应解析为 Contents/Developer'

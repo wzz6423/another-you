@@ -67,7 +67,7 @@ jobs:
           make build
           BIN_DIR="$(./scripts/xcode-toolchain.sh build --package-path macos/AnotherYou --show-bin-path)"
           xcrun vtool -show-build "$BIN_DIR/AnotherYou"
-          test "$(xcrun vtool -show-build "$BIN_DIR/AnotherYou" | awk '$1 == "sdk" { print $2; exit }')" = "$(xcrun --sdk macosx --show-sdk-version)"
+          test "$(xcrun vtool -show-build "$BIN_DIR/AnotherYou" | awk '$1 == "sdk" && !found { print $2; found = 1 }')" = "$(xcrun --sdk macosx --show-sdk-version)"
       - name: Test
         run: make test-swift
       - name: Test development lifecycle

@@ -258,11 +258,21 @@ test("真实后台浏览器超时会释放上下文并允许重启", { timeout: 
   let executablePath: string;
   try { executablePath = await findBrowserExecutable(); } catch (error) { t.skip(String(error)); return; }
   const dataDir = await mkdtemp(join(tmpdir(), "another-you-browser-timeout-"));
-  const session = new BrowserSession({ dataDir, executablePath, timeoutMs: 1500 });
+  const options = { dataDir, executablePath, timeoutMs: 10_000 };
+  const session = new BrowserSession(options);
   const { server, url } = await fixture();
   try {
     await session.execute({ action: "open", url });
-    await assert.rejects(session.execute({ action: "navigate", url: `${url}/slow` }), /超时/);
+    const context = await Reflect.get(session, "context") as BrowserContext;
+    let closed = false;
+    context.on("close", () => { closed = true; });
+    // 仅缩短动作总时限，避免把 Chrome 冷启动也限制为 1.5 秒；底层导航仍保留 10 秒。
+    options.timeoutMs = 1500;
+    try {
+      await assert.rejects(session.execute({ action: "navigate", url: `${url}/slow` }), { message: "浏览器操作超时，已关闭后台浏览器" });
+    } finally { options.timeoutMs = 10_000; }
+    assert.equal(closed, true);
+    assert.deepEqual(context.pages(), []);
     assert.deepEqual(data(await session.execute({ action: "tabs" })).tabs, []);
     assert.match(data(await session.execute({ action: "open", url })).text, /后台网页/);
   } finally {
