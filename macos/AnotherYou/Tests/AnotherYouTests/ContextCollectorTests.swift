@@ -86,8 +86,8 @@ final class ContextCollectorTests: XCTestCase {
     func testPermissionAndUnavailableStatusesRemainExplicit() {
         let session = ProactiveContextSession()
         session.update(["tasks": .object(["work": .object(["state": .string("permission-required")]), "notifications": .object(["state": .string("unavailable")])]), "enabled": .bool(false)])
-        XCTAssertEqual(session.stateLabel("work"), "需要辅助功能权限")
-        XCTAssertEqual(session.stateLabel("notifications"), "来源暂不可访问")
+        XCTAssertEqual(session.stateLabel("work"), AppLocalization.text("需要辅助功能权限"))
+        XCTAssertEqual(session.stateLabel("notifications"), AppLocalization.text("来源暂不可访问"))
         XCTAssertFalse(session.enabled)
     }
 

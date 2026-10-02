@@ -56,7 +56,7 @@ final class ShortcutTests: XCTestCase {
             let reloaded = ShortcutStore(defaults: defaults)
             XCTAssertEqual(reloaded.hotKey(for: .captureRegion), replacement)
             XCTAssertNil(reloaded.hotKey(for: .quit))
-            XCTAssertEqual(reloaded.label(for: .quit), "未设置")
+            XCTAssertEqual(reloaded.label(for: .quit), AppLocalization.text("未设置"))
             reloaded.restoreDefaults()
             let restored = ShortcutStore(defaults: defaults)
             XCTAssertEqual(restored.hotKey(for: .captureRegion), ShortcutAction.captureRegion.defaultHotKey)
