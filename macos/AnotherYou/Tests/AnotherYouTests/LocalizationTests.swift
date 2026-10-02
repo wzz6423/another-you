@@ -104,6 +104,19 @@ final class LocalizationTests: XCTestCase {
         XCTAssertEqual(AppLocalization.string("设置", locale: Locale(identifier: "fr-CA")), "Réglages")
     }
 
+    func testStateAndPermissionLabelsHaveExplicitEnglishAndChineseTranslations() {
+        let translations = [
+            ("需要辅助功能权限", "Accessibility permission required"),
+            ("来源暂不可访问", "Source temporarily unavailable"),
+            ("前台控制未开启。", "Foreground control is disabled."),
+            ("未设置", "Not set")
+        ]
+        for (chinese, english) in translations {
+            XCTAssertEqual(AppLocalization.string(chinese, language: .english), english)
+            XCTAssertEqual(AppLocalization.string(chinese, language: .simplifiedChinese), chinese)
+        }
+    }
+
     func testRuntimeMessagesPreserveVersionModelAndFileValues() {
         XCTAssertEqual(AppLocalization.message("发现新版本 1.2.3"), AppLocalization.text("发现新版本 %@", "1.2.3"))
         XCTAssertEqual(AppLocalization.message("所选 Pi 模型不存在：provider/model"),

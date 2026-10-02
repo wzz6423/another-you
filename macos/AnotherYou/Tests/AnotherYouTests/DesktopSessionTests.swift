@@ -30,7 +30,7 @@ final class DesktopSessionTests: XCTestCase {
         XCTAssertEqual(reply["result"]?.object?["platform"], .string("macOS"))
         XCTAssertTrue(store.history.isEmpty)
         client.emit("desktop.request", payload: ["requestId": .string("forbidden"), "arguments": .object(["action": .string("type"), "background": .bool(false), "text": .string("must-not-type")])])
-        XCTAssertEqual(client.commands.last?["error"], .string("前台控制未开启。"))
+        XCTAssertEqual(client.commands.last?["error"], .string(AppLocalization.text("前台控制未开启。")))
         XCTAssertTrue(store.history.isEmpty)
         await store.shutdown()
     }
