@@ -98,7 +98,7 @@ struct ConversationBoardView: View {
         VStack(alignment: .leading, spacing: 10) {
             if entries.isEmpty {
                 Text(AppLocalization.text(isArchive ? "暂无已归档会话" : "暂无会话"))
-                    .font(.caption).foregroundStyle(.secondary).padding(20).frame(maxWidth: .infinity, alignment: .leading)
+                    .font(.caption).foregroundStyle(.secondary).padding(.vertical, 20).frame(maxWidth: .infinity, alignment: .leading)
             }
             ForEach(groupByApplication ? Array(Set(entries.map(\.appName))).sorted() : [""], id: \.self) { group in
                 if groupByApplication { Text(group).font(.caption.bold()).foregroundStyle(.secondary).padding(.top, 4) }
@@ -120,6 +120,7 @@ struct ConversationBoardView: View {
                     }
                 } label: {
                     Text(entry.title).font(.subheadline.weight(.medium)).lineLimit(3).frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
                 }.buttonStyle(.plain).disabled(entry.session != nil && store.hasPendingPrompt)
                 Menu {
                     Button(AppLocalization.text(entry.archived ? "恢复会话" : "归档")) {

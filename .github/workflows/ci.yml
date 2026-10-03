@@ -93,7 +93,7 @@ jobs:
           plutil -lint "$APP_PATH/Contents/Info.plist"
           codesign --verify --deep --strict "$APP_PATH"
           printf '%s\n' '{"op":"status"}' '{"op":"shutdown"}' |
-            "$APP_PATH/Contents/Resources/runtime/node" --experimental-strip-types \
+            ./scripts/run-isolated-tests.sh "$APP_PATH/Contents/Resources/runtime/node" --experimental-strip-types \
               "$APP_PATH/Contents/Resources/agent-core/src/cli.ts" --stdio \
               --config "${{ runner.temp }}/another-you-smoke/config.json" > "${{ runner.temp }}/another-you-events.jsonl"
           node -e 'const fs = require("node:fs"); const events = fs.readFileSync(process.argv[1], "utf8").trim().split("\n").map(JSON.parse); if (!events.some(e => e.kind === "agent.status") || events.some(e => e.kind === "agent.error")) process.exit(1)' "${{ runner.temp }}/another-you-events.jsonl"

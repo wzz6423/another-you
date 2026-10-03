@@ -108,6 +108,33 @@ public enum AppLocalization {
         localizationBundles[language]?.localizedString(forKey: key, value: key, table: "Localizable") ?? key
     }
 
+    public static func authenticationText(_ value: String, locale: Locale = AppLocalization.locale) -> String {
+        if value.hasPrefix("Enter ") {
+            return format("输入 %@", locale: locale, [String(value.dropFirst("Enter ".count))])
+        }
+        if value.hasPrefix("Sign in with ") && !value.contains("browser") && !value.contains("device code") {
+            return format("使用 %@ 登录", locale: locale, [String(value.dropFirst("Sign in with ".count))])
+        }
+        if value.hasPrefix("Select ") && (value.hasSuffix("login method:") || value.hasSuffix("authentication method:"))
+            || value.hasPrefix("Sign in to ") && value.hasSuffix(":") {
+            return string("选择登录方式", locale: locale)
+        }
+        switch value {
+        case "Browser login (default)", "Sign in with browser (recommended)":
+            return string("网页登录", locale: locale)
+        case "Device code login (headless)", "Sign in with device code (when signing in from another device)":
+            return string("设备码登录", locale: locale)
+        case "Complete login in your browser, or paste the authorization code / redirect URL here:",
+             "Complete login in your browser, or paste the final redirect URL here:",
+             "Complete sign-in in your browser, or paste the authorization code / redirect URL here:",
+             "Complete sign-in in your browser. If the callback does not complete, paste the final redirect URL here.":
+            return string("在浏览器中完成登录；如未自动完成，请粘贴授权码或回调网址。", locale: locale)
+        case "A browser window should open. Complete login to finish.":
+            return string("请在浏览器中完成登录。", locale: locale)
+        default: return string(value, locale: locale)
+        }
+    }
+
     public static func string(_ key: String, locale: Locale) -> String {
         string(key, language: AppLanguage.resolve(locale.identifier) ?? .english)
     }

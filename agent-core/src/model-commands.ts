@@ -16,15 +16,23 @@ export interface ModelCommand {
   value?: string;
   path?: string;
   refresh?: boolean;
+  baseUrl?: string;
+  api?: string;
+  apiKey?: string;
 }
 
 interface PendingPrompt {
   id: string;
   prompt: AuthPrompt;
+  required: boolean;
   resolve(value: string): void;
 }
 
-const OPERATIONS = new Set(["modelCatalog", "modelSelect", "modelLogin", "modelLogout", "modelImport", "modelAuthReply", "modelAuthCancel"]);
+const OPERATIONS = new Set(["modelCatalog", "modelSelect", "modelConfigure", "modelTest", "modelLogin", "modelLogout", "modelImport", "modelAuthReply", "modelAuthCancel"]);
+const REQUIRED_TEXT_PROMPTS = new Set([
+  "Enter Cloudflare account ID", "Enter Cloudflare AI Gateway ID", "Enter AWS profile name",
+  "Enter Google Cloud project ID", "Enter Google Cloud location", "Enter service account credentials file path",
+]);
 
 function required(value: unknown, field: string): string {
   if (typeof value !== "string" || !value.trim() || value.length > 8192) throw new Error(`${field} 无效`);
@@ -51,10 +59,12 @@ export class ModelCommandHandler {
       const requestId = required(command.requestId, "requestId");
       if (command.op === "modelAuthReply") {
         if (this.active?.requestId !== requestId || !this.prompt || command.promptId !== this.prompt.id) throw new Error("认证输入已失效");
-        const value = required(command.value, "认证输入");
+        const input = command.value;
+        if (typeof input !== "string" || input.length > 8192 || (this.prompt.required && !input.trim())) throw new Error("认证输入 无效");
+        const value = this.prompt.prompt.type === "select" ? input : input.trim();
         if (this.prompt.prompt.type === "select" && !this.prompt.prompt.options.some(option => option.id === value)) throw new Error("请选择有效选项");
         if (this.prompt.prompt.type === "secret" && hasExternalConfigurationValue(value)) throw new Error("请输入凭据本身，不能使用环境变量或命令");
-        if (this.prompt.prompt.type !== "select") this.secrets.add(value);
+        if (this.prompt.prompt.type !== "select" && value) { this.secrets.add(input); this.secrets.add(value); }
         this.prompt.resolve(value);
       } else if (command.op === "modelAuthCancel") {
         if (this.active?.requestId !== requestId) throw new Error("认证操作已结束");
@@ -78,12 +88,22 @@ export class ModelCommandHandler {
   }
 
   private async run(command: ModelCommand, requestId: string, abort: AbortController): Promise<void> {
-    const timeout = setTimeout(() => abort.abort(), command.op === "modelLogin" ? 10 * 60_000 : 20_000);
+    if (typeof command.apiKey === "string") { this.secrets.add(command.apiKey); this.secrets.add(command.apiKey.trim()); }
+    const timeout = setTimeout(() => abort.abort(), command.op === "modelLogin" ? 10 * 60_000 : command.op === "modelTest" ? 60_000 : 20_000);
     this.operation(command, "started");
     try {
+      if (command.op === "modelTest") {
+        await this.backend.run({ agentRole: "context-analyst", prompt: 'Return only {"ok": true}.', signal: abort.signal });
+        this.operation(command, "succeeded", "连接测试成功");
+        return;
+      }
       await this.backend.changeModelConfiguration(async () => {
         const configuration = this.backend.modelConfiguration;
-        if (command.op === "modelSelect") {
+        if (command.op === "modelConfigure") {
+          await configuration.configureAPI({ provider: required(command.provider, "provider"), baseUrl: required(command.baseUrl, "baseUrl"),
+            api: required(command.api, "api"), model: required(command.model, "model"), apiKey: command.apiKey,
+            thinkingLevel: command.thinkingLevel }, abort.signal);
+        } else if (command.op === "modelSelect") {
           await configuration.select(required(command.provider, "provider"), required(command.model, "model"), command.thinkingLevel);
         } else if (command.op === "modelLogin") {
           if (command.authType !== "api_key" && command.authType !== "oauth") throw new Error("请选择有效登录方式");
@@ -104,7 +124,10 @@ export class ModelCommandHandler {
       });
       this.operation(command, "succeeded", command.op === "modelImport"
         ? "模型配置已导入，认证信息未复制"
-        : command.op === "modelLogout" ? "账户已注销" : "配置已保存，发送请求后验证连接");
+        : command.op === "modelLogout" ? "账户已注销"
+        : command.op === "modelLogin" ? this.backend.modelConfiguration.snapshot.providers.find(provider => provider.id === command.provider)?.configured
+          ? "账户已保存，请选择模型" : "账户信息已保存，但凭据尚不可用，请检查配置或更换登录方式"
+        : command.op === "modelCatalog" ? "模型目录已更新" : this.backend.modelConfiguration.message);
       this.catalog(requestId);
     } catch (error) {
       this.operation(command, abort.signal.aborted ? "cancelled" : "failed",
@@ -117,6 +140,7 @@ export class ModelCommandHandler {
     const combined = prompt.signal ? AbortSignal.any([signal, prompt.signal]) : signal;
     combined.throwIfAborted();
     const id = randomUUID();
+    const required = prompt.type !== "text" || REQUIRED_TEXT_PROMPTS.has(prompt.message);
     return new Promise((resolve, reject) => {
       const finish = (): void => { combined.removeEventListener("abort", cancel); if (this.prompt?.id === id) this.prompt = undefined; };
       const cancel = (): void => {
@@ -124,14 +148,14 @@ export class ModelCommandHandler {
         this.auth({ requestId, provider, stage: "promptCancelled", promptId: id });
         reject(new Error("认证输入已取消"));
       };
-      this.prompt = { id, prompt, resolve: value => {
+      this.prompt = { id, prompt, required, resolve: value => {
         finish();
         this.auth({ requestId, provider, stage: "promptResolved", promptId: id });
         resolve(value);
       } };
       combined.addEventListener("abort", cancel, { once: true });
       const { signal: _signal, ...fields } = prompt;
-      this.auth({ requestId, provider, stage: "prompt", prompt: { ...fields, id } });
+      this.auth({ requestId, provider, stage: "prompt", prompt: { ...fields, id, required } });
       if (combined.aborted) cancel();
     });
   }

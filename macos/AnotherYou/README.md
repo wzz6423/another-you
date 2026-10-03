@@ -4,6 +4,8 @@
 
 The native SwiftUI client for the 0.1.0 development preview. It provides a main window, menu bar controls, Pi model status, and optional system notifications. The UI currently uses Chinese. Agent rules, model requests, and persisted suggestion state live in the Node sidecar.
 
+Debug apps use the dark icon; Release apps use the light icon in Finder and the Dock, regardless of appearance. The sidebar logo follows the app's light, dark, or system appearance setting, and the menu bar uses a monochrome template of the same mark. Brand assets are bundled from [Resources](Sources/AnotherYouCore/Resources).
+
 ## Run from source
 
 The app supports macOS 14+. Source builds require full Xcode 27+ with the macOS 27+ SDK, Node.js 22.19+, and npm. Run from the repository root:
@@ -13,14 +15,16 @@ make deps
 make run
 ```
 
-`make run` builds and launches `dist/dev/Another You.app`. Its process record and log are stored alongside it; startup diagnostics are in `dist/dev/another-you.log`.
+`make run` builds and launches `dist/dev/Another You.app` in Debug mode, with the display name **Another You Debug** and bundle identifier `com.anotheryou.mac.debug`. Its process record and log are stored alongside it; startup diagnostics are in `dist/dev/another-you.log`.
 
 ```bash
 make stop
 make update
 ```
 
-`make stop` stops the development instance managed by this workspace. `make update` rebuilds and restarts the local source; it does not fetch Git changes. For a separate development app or a bundled Node runtime, see [packaging](../../docs/releasing.md).
+The Debug app defaults to `~/Library/Application Support/AnotherYouDebug/`, keeping its configuration, state, and preferences separate from the Release app. `ANOTHER_YOU_DATA_DIR` overrides the data path.
+
+`make stop` stops the development instance managed by this workspace. `make update` rebuilds and restarts the local source in Debug mode; it does not fetch Git changes. `make build-package` produces a separate Release app. For bundled Node details, see [packaging](../../docs/releasing.md).
 
 For direct Swift development without an app bundle:
 
@@ -35,25 +39,27 @@ Build and test commands use the full Xcode selected by `DEVELOPER_DIR` or `xcode
 
 ## Use Pi models
 
-Settings are split into General, Model, Proactive suggestions, Computer control, Shortcuts, and Software updates. The Model page shows Pi's default model, provider, and thinking level without maintaining separate model or credential settings.
+Settings are split into General, Model, Proactive suggestions, Computer control, Shortcuts, and Software updates. The Model page manages the app's isolated Pi model and account configuration directly.
 
-1. Configure authentication (`/login`) or a model service in local Pi. Local models also belong in Pi's `models.json` or its local-model setup.
-2. Select a model in Pi's `/model` and press **Ctrl+S** to save the default. Save a default thinking level in `/thinking` if needed.
-3. Click **重新读取 Pi 配置** under Another You's **设置 → 模型**, then send a request to verify the model.
+1. Select a provider under **Settings → Model**, or choose **Custom API** to add a compatible service.
+2. Enter the endpoint, protocol, API key, and model ID, then click **Save and use**. Leave an existing key blank to retain it. For web login or other authentication methods, authenticate first, select a model and thinking level, and click **Use this model**.
+3. Click **Test connection** to check the actual request outcome; saving does not prove availability. Advanced Pi model definitions can still be imported or edited, then loaded with **Reload configuration**.
 
-The app reads Pi's `settings.json`, `models.json`, and `auth.json` from `~/.pi/agent`, respecting `PI_CODING_AGENT_DIR`. Legacy Another You `model` settings no longer apply and are never migrated into Pi automatically. Missing defaults or credentials are reported explicitly; loading configuration does not verify a real request. Requests use Pi's native authentication and provider routing.
+The app automatically discovers Pi's `settings.json`, `models.json`, and `auth.json` in `~/.pi/agent`, respecting `PI_CODING_AGENT_DIR`. The first valid discovery copies models and accounts into an independent `<dataDir>/pi` snapshot, with existing app configuration taking precedence. Later source changes do not overwrite app choices or restore logged-out accounts. Without local Pi, accounts can still be configured in Settings. Legacy Another You `model` settings no longer apply, and the app never writes back to personal Pi configuration. Missing defaults or credentials are reported explicitly; loading configuration does not verify a real request. Requests use Pi's native authentication and provider routing.
 
 ## Conversations and usage
 
-Quick chat shows a glass capsule input, with removable screenshot previews above it when attached, centered horizontally on the screen containing the pointer, 20% above the bottom of the screen. macOS 26+ uses native Liquid Glass, with a material fallback on older systems. Return or the send shortcut submits and hides it; read replies in the main conversation page.
+Quick chat shows a compact 44pt glass capsule with a black overlay fading from top to bottom, centered horizontally on the screen containing the pointer, 20% above the bottom of the screen. macOS 26+ uses native Liquid Glass; earlier systems fall back to frosted glass. The right side contains a red close button and a blue run button; closing preserves the draft. Removable screenshot previews appear above the input when attached. Return, the send shortcut, or the run button submits and hides it; read replies in the main conversation page.
 
 Open **会话** in the sidebar for a dedicated conversation page. While the app runs, **⌘⇧Space** opens quick chat globally; **⌘Return** sends and **Esc** hides it. Both entry points share sent messages; closing quick chat preserves the conversation. If shortcut registration fails, use the menu entry. Each conversation uses its own latest 20 successful turns as context, separate from other conversations and proposal drafts. The sidecar persists titles, state, and complete message history per conversation; restoration respects content-storage preferences. Screenshot binaries are not persisted or silently resent in later turns.
 
-The home board and **Conversations** page have **In progress / Completed** columns for conversations and proactive suggestions, with optional grouping by the application associated with a snapshot. **Archived conversations** lives on the Conversations page, collapsed by default, with view, restore, and delete actions. A separated composer below the board creates a conversation only on the first send; switching preserves each conversation’s unsent text and snapshot attachments. Opening a conversation shows its full context, follow-up input, export, and actions to branch from a turn or the entire conversation. Archived details can be restored directly. Branches retain their source without changing the original or adding duplicate usage. Suggestions open for review and a decision. Stop running conversations before managing them; the UI waits for sidecar acknowledgements. See [Exports](../../docs/exporting.md) for conversation Markdown and home usage CSV contents and limitations.
+The **Conversations** page has **In progress / Completed** columns for conversations and proactive suggestions, with optional grouping by the application associated with a snapshot. **Archived conversations** lives on the Conversations page, collapsed by default, with view, restore, and delete actions. A separated composer below the board creates a conversation only on the first send; switching preserves each conversation’s unsent text and snapshot attachments. Opening a conversation shows its full context, follow-up input, export, and actions to branch from a turn or the entire conversation. Archived details can be restored directly. Branches retain their source without changing the original or adding duplicate usage. Suggestions open for review and a decision. Stop running conversations before managing them; the UI waits for sidecar acknowledgements. See [Exports](../../docs/exporting.md) for conversation Markdown and home usage CSV contents and limitations.
 
 **Activity** shows individual thinking, execution, command, and application-context stages, with category filters and grouping. Thinking logs contain stage metadata only, never the model’s private reasoning text.
 
 The dashboard pie chart shows model Token shares for **24h / 7d / 15d / 30d**, with input, output, cache, model rankings, reasoning depth, and tool calls. Records begin with this version and remain for 30 days, including reported usage from failures. Missing usage is labeled as unreported, never estimated. Plugin / Skill / MCP appear only when the runtime records such calls; no corresponding connectors are bundled yet.
+
+Home **Activity statistics** provides a daily heatmap for the last **6 months**, with square cells filling the available width automatically and no time-range selection; it also shows an hourly chart for today in local time and event counts by application, with an application filter. Each accepted message and each newly created proactive suggestion counts once. Background analysis, suggestion reminders or execution, and conversation forks do not add events. Application attribution uses the current snapshot, an existing conversation association, or suggestion context; missing associations appear as unlinked. Statistics metadata is retained independently for 186 days and survives conversation archiving or deletion. Upgrades migrate only existing historical events; previously removed history is not reconstructed.
 
 ## Suggestions and notifications
 
@@ -61,7 +67,7 @@ Suggestions come from app-launch, local-time, and actual Mac idle signals. Idle 
 
 Choose **生成草稿**, **稍后**, or **忽略** on a suggestion. Snooze defaults to 15 minutes; due suggestions return while the runtime is running and proactive scheduling is enabled and unpaused. Draft generation changes the suggestion only after the sidecar acknowledges the decision. A failure can be retried manually. **暂停主动建议** survives restarts and does not cancel a model request already submitted.
 
-System notifications are off initially. From the packaged app, enable **设置 → 介入方式 → 新建议显示系统通知** and allow macOS notification permission. A new suggestion event can request a notification when the app is inactive and proactive suggestions are not paused. Loading stored cards does not itself notify. macOS settings and Focus can affect delivery, so enabling the option is not proof that a notification was delivered.
+Proactive suggestions and system notifications are enabled by default; existing pause, disabled configuration, and notification choices are preserved. Once the packaged app is active and suggestions are enabled and unpaused, it requests undetermined notification permission and makes a one-time Accessibility request for reading work and notification text. Declined notification permission switches notifications off. Accessibility is not requested repeatedly after a denial; use **Settings → Proactive suggestions → Accessibility** to request it again. Text collection does not require Screen Recording; snapshots still require separate authorization in Computer interaction settings. A new suggestion event can request a notification when the app is inactive and suggestions are unpaused. Loading saved cards does not notify. macOS settings and Focus can affect delivery, so enabling the option does not prove delivery.
 
 The notification preference is stored in `UserDefaults` under `notificationsEnabled`. It is separate from `config.json` and `tools.notifications`; changing that Agent field does not switch native notifications on or off. The app must be running to observe signals; launch at login and scheduling while the app is closed are not implemented.
 

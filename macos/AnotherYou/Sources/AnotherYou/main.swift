@@ -9,6 +9,10 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate {
     var shortcuts: GlobalShortcutCoordinator?
     private var isTerminating = false
 
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        AppBranding.updateApplicationIcon()
+    }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard !isTerminating else { return .terminateNow }
         isTerminating = true
@@ -35,7 +39,7 @@ struct AnotherYouApp: App {
                 .environment(\.layoutDirection, languages.layoutDirection)
                 .task {
                     delegate.store = store
-                    delegate.quickChat.configure(store: store, onSettings: showSettings)
+                    delegate.quickChat.configure(store: store)
                     if delegate.shortcuts == nil {
                         let coordinator = GlobalShortcutCoordinator { action in
                             switch action {
@@ -78,7 +82,7 @@ struct AnotherYouApp: App {
         .defaultSize(width: 720, height: 600)
         .windowResizability(.contentMinSize)
 
-        MenuBarExtra("Another You", systemImage: "circle.lefthalf.filled") {
+        MenuBarExtra {
             Text(store.paused && store.isConnected ? AppLocalization.text("主动建议已暂停") : store.connection.label)
             if store.pendingCount > 0 { Text(AppLocalization.text("%d 条建议等待决定", store.pendingCount)) }
             Divider()
@@ -95,6 +99,9 @@ struct AnotherYouApp: App {
             CheckForUpdatesButton(updates: store.updates)
             Divider()
             Button(AppLocalization.text("退出 Another You")) { NSApplication.shared.terminate(nil) }.appShortcut(.quit)
+        } label: {
+            Image(nsImage: AppBranding.menuBarIcon)
+                .accessibilityLabel("Another You")
         }
     }
 

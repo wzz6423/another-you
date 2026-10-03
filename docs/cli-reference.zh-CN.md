@@ -54,15 +54,17 @@ CLI 恢复状态、启动已启用的调度、检查当前时间、发出 `app-l
 | --- | --- | --- |
 | `modelCatalog` | 可选 `refresh: true` | 读取本地模型目录；显式刷新时请求已配置提供方的目录。 |
 | `modelSelect` | `provider`、`model`；可选 `thinkingLevel` | 保存 Pi 默认模型与受支持的思考深度。 |
+| `modelConfigure` | `provider`、`baseUrl`、`api`、`model`；可选 `apiKey`、`thinkingLevel` | 校验并合并 API 配置，单独保存密钥并选择模型；支持 `openai-completions`、`openai-responses`、`anthropic-messages`。省略或留空密钥仅保留已有可用 API key 凭据，保存不验证连接。 |
+| `modelTest` | 无 | 向保存的模型发送无工具、无会话上下文的短请求，回传实际连接结果。 |
 | `modelLogin` | `provider`、`authType: api_key / oauth` | 启动 Pi 认证交互。 |
-| `modelAuthReply` | 登录的 `requestId`、`promptId`、`value` | 回复当前认证问题；错误或过期的 prompt 不结束原登录。 |
+| `modelAuthReply` | 登录的 `requestId`、`promptId`、`value` | 回复当前认证问题；text 按 prompt.required 校验，可选文本允许空字符串；secret / manual_code 不接受空白，select 必须匹配选项。非选择项输入提交前会去掉首尾空白。错误或过期的 prompt 不结束原登录。 |
 | `modelAuthCancel` | 当前操作的 `requestId` | 取消账户操作或目录刷新。 |
 | `modelLogout` | `provider` | 移除该提供方的独立账户凭据。 |
 | `modelImport` | `path`（绝对路径） | 导入模型定义与默认选择，不导入凭据。 |
 
-`model.catalog` 返回 `models`、`providers`、可选 `selected` 与 `message`。`model.operation` 返回 `operation` 和 `state`（`started`、`succeeded`、`failed`、`cancelled`）；发送命令不代表保存成功。`model.auth` 使用 `stage` 表示 `prompt`、`promptResolved`、`promptCancelled` 或 `notify`，并携带 `requestId`、`provider`。prompt 类型遵循 Pi：`text`、`secret`、`manual_code`、`select`，选择项提交其 `id`。
+`model.catalog` 返回 `models`、`providers`、可选 `selected` 与 `message`。支持 API 表单的提供方另含 `apiConfiguration: { baseUrl, api }`，地址不携带凭据、查询参数或片段，不返回密钥。`model.operation` 返回 `operation` 和 `state`（`started`、`succeeded`、`failed`、`cancelled`）；发送命令不代表保存成功。`model.auth` 使用 `stage` 表示 `prompt`、`promptResolved`、`promptCancelled` 或 `notify`，并携带 `requestId`、`provider`。prompt 类型遵循 Pi：`text`、`secret`、`manual_code`、`select`，选择项提交其 `id`。
 
-模型修改、登录和刷新互斥，并与模型请求互斥；本地目录读取仍可用。认证操作最长 10 分钟，目录刷新最长 20 秒。EOF、关闭或断开会取消等待中的认证。认证内容仅即时传输，不进入 EventBus、会话和状态历史。真实提供方登录和模型兼容性需要另行验证。
+模型修改、登录、刷新和连接测试互斥，并与模型请求互斥；本地目录读取仍可用。认证操作最长 10 分钟，目录刷新最长 20 秒，连接测试最长 60 秒并可通过 `modelAuthCancel` 取消。EOF、关闭或断开会取消等待中的认证与连接测试。认证内容仅即时传输，不进入 EventBus、会话和状态历史。真实提供方登录和模型兼容性需要另行验证。
 
 ## 会话与活动协议
 
@@ -130,12 +132,13 @@ CLI 恢复状态、启动已启用的调度、检查当前时间、发出 `app-l
 
 | `kind` | 主要 payload 字段 |
 | --- | --- |
-| `agent.status` | `configPath`、`paused`、`schedulerEnabled`、`model`、`proactive`、`rules`、`proposals`、`history`、`usageRecords` |
+| `agent.status` | `configPath`、`paused`、`schedulerEnabled`、`model`、`proactive`、`rules`、`proposals`、`history`、`usageRecords`、`activityRecords` |
 | `scheduler.status` | `running`，部分事件带 `paused` |
 | `proactive.status` | `taskId`、`running`、`tasks`、`sources`、`intervals` |
 | `context.request` / `context.cancel` | `requestId`、`source`；请求或取消工作/通知采集 |
 | `proactive.suggestion` | `suggestionId`、`ruleId`、`title`、`message`、`summary`、`reason`、`createdAt`、`state`、`trigger`、`context`、`signal` |
-| `agent.request` | `requestId`、`prompt` |
+| `agent.request` | `requestId`、`conversationId`、`prompt`、可选 `appName` |
+| `activity.recorded` | `kind`（`prompt` / `suggestion`）、可选 `appName`；外层 `id`、`occurredAt` 为统计记录的身份和时间 |
 | `agent.usage` | `source`、`model`、`outcome`、可选 `usage`、`reasoningEffort`、`toolCalls` |
 | `agent.response` | `requestId`、`text`、`model` |
 | `proposal.updated` | `suggestionId`、`decision`、`state`；可选 `text`、`snoozedUntil` |

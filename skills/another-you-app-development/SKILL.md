@@ -1,11 +1,28 @@
 ---
 name: another-you-app-development
-description: 开发、修复或评审 Another You 的原生 macOS 应用、Node/Pi sidecar、官网与开发脚本时使用。覆盖 SwiftPM/SwiftUI 与 JSONL 边界、实际窗口验证、针对性测试和产物清理；正式发布使用 another-you-release。
+description: 开发、修复或评审 Another You 的原生 macOS 应用、Node/Pi sidecar、官网、开发脚本与开发规范时使用，也适用于维护本项目的 Git 提交说明。覆盖 Claude Code 协作、针对性验证与清理；正式发布使用 another-you-release。
 ---
 
 # Another You 开发
 
 从当前 Another You checkout 根目录执行命令。全局安装的 Skill 软链只用于发现，不把软链父目录当作仓库根。开始先记录 `git status --short`，阅读适用的 `AGENTS.md`、[贡献指南](../../CONTRIBUTING.zh-CN.md) 和相关实现；保留用户及并行任务已有修改。
+
+## 开发工作方式
+
+- 全程用中文沟通，Git 提交说明的语言按下文执行。先浏览项目结构与模块划分，阅读修改涉及的实现、测试及配置，识别现有工具函数、组件、编码风格和设计模式，不跳过阅读直接修改。
+- 动手前列出必要的修改位置（`文件:行号`）、原因、影响范围、方案与验证方法。分析充分后直接修改、调试和 debug，不为已经明确或已经授权的工作重复请求确认。
+- 需求不清楚、实现意图不确定或存在需要用户取舍的多个方案时，先说明问题并询问，不猜测；有多个方案时列出选项及影响。发现影响当前任务的代码问题直接修复，无关问题先说明，不扩大修改范围。
+- 只改必要代码，优先复用项目已有能力，遵循现有风格。仅在逻辑不自明时添加注释，解释为什么，不重复代码已经表达的内容。
+- 按小步骤推进。每次进度更新包含估算百分比、当前操作、涉及文件或处理数量、中间结果和下一步；每完成一个子步骤或一小批操作就更新，长时间操作期间至少每 60 秒说明一次，遇到问题及时说明。百分比仅表示任务进度估计，不能代替实际验证结果。
+
+## Claude Code 自动协作
+
+- 非平凡任务尽早使用 Claude Code 协作，包括开发、排障、测试失败、复杂重构、迁移、评审后修复、陌生代码探索、方案与风险判断，以及文档、配置或提示词修改。非常小、纯文本、单条命令即可完成，或结论明确且风险很低的任务可以直接完成，不强行委派。
+- 子智能体默认沿用父智能体的模型和思考深度；简单的文本探索、阅读与编辑任务可以使用更轻量的配置。Claude Code 使用当前可用配置。
+- 委派任务必须收敛且可验证，写明五项执行契约：只改指定范围、复用现有模式、实际落地修改、运行明确的 UT 及按风险需要的集成或 E2E 命令、清理本次构建与 binary 及临时产物。验证命令按下文的修改边界选择，纯文档不要求客户端测试。
+- 除用户明确要求纯审查、纯分析或禁止修改外，实现、排障、验证和评审后修复子任务必须阅读相关代码、直接写最小补丁并运行验证；失败时继续 debug 到通过，或给出明确阻塞证据，不停在只读建议。返回修改文件、测试命令、成功与失败数、清理状态和残余风险。
+- Claude Code 后台工作通过可持续终端 session 执行并持续轮询；除用户要求停止或确认不可恢复错误外，不因等待较久而中止。出现额度、usage/rate limit、billing/credit、渠道或 provider、鉴权、模型不可用或连续网络失败时，本任务内停止重试，由主线程继续完成。
+- 主线程必须检查实际 `git diff`，决定是否采用执行器的修改，并独立重跑相关验证、检查清理结果；不能只转述执行器的“通过”，最终结论由主线程负责。
 
 ## 按修改范围阅读
 
@@ -34,16 +51,16 @@ description: 开发、修复或评审 Another You 的原生 macOS 应用、Node/
 ```sh
 make deps           # 安装锁定的 Agent 开发依赖
 make check          # TypeScript、官网 JavaScript 与 Shell 语法
-make build          # Swift 可执行文件
-make run            # 构建并启动 dist/dev/Another You.app
-make update         # 本地源码重建并重启，不执行 git pull，也不是应用在线更新
+make build          # 仅编译 Debug Swift 可执行文件，不打包或启动
+make run            # 构建并启动 Debug 应用 dist/dev/Another You.app
+make update         # 本地源码重建并重启 Debug 应用，不执行 git pull，也不是应用在线更新
 make stop           # 停止本工作区管理的开发实例
-make build-package  # 生成开发 .app；输出目录已有应用时拒绝覆盖
+make build-package  # 打包 Release .app；输出目录已有应用时拒绝覆盖
 make website        # 预览官网；PORT 可覆盖
 make pi-source      # 仅需阅读锁定上游源码时使用
 ```
 
-`run/update` 会替换本工作区受管理的运行实例；启动前确认这符合本次要求。一次性验证优先用新 `OUTPUT_DIRECTORY` 打包，避免替换用户正在使用的应用。默认 `BUNDLE_NODE=1` 会按 `scripts/runtime-dependencies.json` 下载并校验官方 Node 与后台浏览器，随包携带 npm、生产依赖和许可证。`ANOTHER_YOU_NODE` 覆盖必须指向完整官方发行目录的 `bin/node`，该目录需要 `include/node/node_version.h`、`lib/node_modules/npm` 与许可证；Node `LICENSE` 可用 `ANOTHER_YOU_NODE_LICENSE` 指定。不能只复制依赖外部动态库的 Homebrew Node。只有显式 `BUNDLE_NODE=0` 才使用本机 Node/浏览器，不能分发这种包。正式发布走[发布 Skill](../another-you-release/SKILL.md)。
+`run/update` 固定使用 Debug 配置并禁用在线更新，显示名称为 Another You Debug，Bundle ID 为 `com.anotheryou.mac.debug`，默认数据目录为 `~/Library/Application Support/AnotherYouDebug/`（`ANOTHER_YOU_DATA_DIR` 可覆盖）。Debug 产物包含独立 `.dSYM`，`update` 同步替换，`clean` 一并清理。`build-package` 固定使用 Release，默认仍为 ad-hoc 签名且禁用在线更新。`run/update` 会替换本工作区受管理的运行实例；启动前确认这符合本次要求。一次性验证优先用新 `OUTPUT_DIRECTORY` 打包，避免替换用户正在使用的应用。默认 `BUNDLE_NODE=1` 会按 `scripts/runtime-dependencies.json` 下载并校验官方 Node 与后台浏览器，随包携带 npm、生产依赖和许可证。`ANOTHER_YOU_NODE` 覆盖必须指向完整官方发行目录的 `bin/node`，该目录需要 `include/node/node_version.h`、`lib/node_modules/npm` 与许可证；Node `LICENSE` 可用 `ANOTHER_YOU_NODE_LICENSE` 指定。不能只复制依赖外部动态库的 Homebrew Node。只有显式 `BUNDLE_NODE=0` 才使用本机 Node/浏览器，不能分发这种包。正式发布走[发布 Skill](../another-you-release/SKILL.md)。
 
 ## 验证改变的边界
 
@@ -65,12 +82,20 @@ SwiftUI 修改需要运行应用并实际操作：设置从侧栏、菜单及快
 
 隔离应用数据用 `ANOTHER_YOU_DATA_DIR` 指向本次临时目录；它不会隔离 `UserDefaults`。若验证涉及更新或通知偏好，应使用测试注入的独立 defaults 域，或记录并恢复改动的偏好，不能清空用户默认域。
 
+## Git 提交规范
+
+- 与用户沟通和项目 Skill 使用中文；所有 Git commit 的标题与正文使用英文，新增、amend、merge 和 squash 提交均适用。沿用已有的 `feat:`、`fix:`、`docs:`、`test:` 等提交风格，准确描述实际改动。
+- 提交前检查 `git diff --cached` 和待提交说明，只包含本次任务的文件；保留用户及并行任务的未提交修改，不把英文提交规范当作自动提交、推送或改写历史的授权。
+- 用户要求统一历史提交语言时，先检查所有目标分支、标签和远端，列出需要翻译的标题与正文，保留已经是英文的消息。改写前在工作区之外或 `.git` 内保存可恢复的原历史备份；仅改变消息及必要的父提交引用，保留各提交的文件树、作者、提交者和时间。
+- 改写后逐条核对提交数量、文件树、作者与时间、父子拓扑和完整消息，并核对工作区及暂存区内容。仅修改提交消息时使用这些 Git 校验，不为此运行客户端构建或测试。
+- 同步已发布历史前，先完成可审阅的英文消息、备份和本地验证，说明目标远端、分支及提交哈希变化；已有明确授权则直接执行，否则在推送前请求确认。使用带精确预期旧 SHA 的 `--force-with-lease`，远端发生变化时停止覆盖；推送后查询目标远端验证结果。
+
 ## 清理与交付
 
 - 清理本次创建的 binary、构建目录、截图、日志、临时配置和测试进程；保留用户要求继续运行的应用、交付文件、依赖与 Pi 缓存。
 - `make clean` 会停止受管理的 `dist/dev` 应用，并清理 Swift `.build`、默认开发包等共享产物；只有这些内容属于本次验证或用户要求整体清理时才执行。自定义输出另行按准确路径删除。
 - 不删除 `~/Library/Application Support/AnotherYou/`、用户偏好或运行中的其他实例来“恢复测试环境”。不要提交凭据、用户数据或构建产物。
-- 完成后检查 `git diff --check`、实际 diff 和 `git status --short`，报告修改文件、执行过的验证、结果与未验证范围。子执行器的结论必须由主线程检查 diff 并独立验证。
+- 完成后检查 `git diff --check`、实际 diff 和 `git status --short`，报告修改文件、执行过的验证命令、成功与失败数、清理结果、未验证范围和残余风险。子执行器的结论必须由主线程检查 diff 并独立验证。
 - 开发、Issue 和 PR 使用 GitHub，Gitee 用作源码与发布镜像。GitHub Project 只保留既有视图与字段，不新建任务卡或自动把 Issue/PR 加入看板。开发请求不自动包含发版、修改 tap 或改变仓库可见性的授权。
 
 更改已记录行为、命令和设置时同步对应中英文文档；项目 Skill 本身采用中文。

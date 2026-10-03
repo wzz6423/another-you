@@ -402,9 +402,15 @@ final class NodeSidecarIntegrationTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: directory) }
         let repository = AgentSettingsRepository(dataDirectory: directory)
         try repository.ensureConfig()
+        let state = """
+        {"version":1,"paused":false,"proposals":[],"history":[],
+         "scheduler":{"lastFiredAt":{},"lastDedupeAt":{}},
+         "rules":[{"id":"sidecar-test-startup","type":"event","eventName":"app-launched",
+                   "title":"Sidecar integration fixture","message":"Test proposal decisions and restart"}]}
+        """
+        try Data(state.utf8).write(to: directory.appendingPathComponent("state.json"), options: .atomic)
         var environment = ProcessInfo.processInfo.environment
         environment["ANOTHER_YOU_AGENT_ROOT"] = agentRoot.path
-        environment["PI_CODING_AGENT_DIR"] = directory.appendingPathComponent("pi").path
         let launch = try SidecarLaunchConfiguration.resolve(configURL: repository.configURL, environment: environment, resourceDirectory: nil, workingDirectory: root, executableURL: nil)
         let client = ProcessAgentClient(launchConfiguration: launch)
         let store = AssistantStore(client: client, repository: repository)
@@ -415,10 +421,12 @@ final class NodeSidecarIntegrationTests: XCTestCase {
         }
         XCTAssertTrue(store.isConnected, store.statusMessage)
         guard let first = store.cards.first else {
+            let statusMessage = store.statusMessage
             await store.shutdown()
-            XCTFail("真实 Node sidecar 没有生成启动建议：\(store.statusMessage)")
+            XCTFail("真实 Node sidecar 没有生成测试规则建议：\(statusMessage)")
             return
         }
+        XCTAssertEqual(first.title, "Sidecar integration fixture")
         XCTAssertEqual(first.state, .pending)
         store.apply(.later, to: first)
         for _ in 0..<100 {

@@ -24,6 +24,8 @@ make test
 
 Node 测试使用本地 HTTP fixture，不需要真实 API 密钥或下载模型。Swift 测试包含真实 Node sidecar，因此应先安装 Agent 依赖。针对单个模块可使用 `make test-agent`、`make test-swift` 或 `make test-scripts`。
 
+`make test-agent` 与 `make test-swift` 将 Pi 自动发现隔离到临时目录，并在退出时清理，避免测试读取个人 Pi 账户。直接筛选测试时也使用同一入口：`./scripts/run-isolated-tests.sh ./scripts/xcode-toolchain.sh test --package-path macos/AnotherYou --filter LocalizationTests`。
+
 ## 保持修改收敛
 
 - 修改前阅读相关实现，优先复用已有工具和模式。

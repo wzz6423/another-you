@@ -1,15 +1,36 @@
 import { strict as assert } from "node:assert";
-import { access, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { once } from "node:events";
+import { access, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test, { type TestContext } from "node:test";
-import type { MutableModels, ProviderAuthInteraction } from "@earendil-works/pi-ai";
+import test, { after, type TestContext } from "node:test";
+import type { AuthPrompt, MutableModels, ProviderAuthInteraction } from "@earendil-works/pi-ai";
 import { createDefaultConfig } from "../src/config.ts";
 import type { AgentEvent } from "../src/events.ts";
 import { ModelCommandHandler } from "../src/model-commands.ts";
 import { hasExternalConfigurationValue, ModelConfiguration } from "../src/model-configuration.ts";
 import { PiSdkBackend } from "../src/pi-adapter.ts";
 import { writePiFixture } from "./pi-fixture.ts";
+
+const isolatedPiRoot = await mkdtemp(join(tmpdir(), "another-you-pi-discovery-"));
+const originalPiDirectory = process.env.PI_CODING_AGENT_DIR;
+process.env.PI_CODING_AGENT_DIR = join(isolatedPiRoot, "absent");
+after(async () => {
+  if (originalPiDirectory === undefined) delete process.env.PI_CODING_AGENT_DIR;
+  else process.env.PI_CODING_AGENT_DIR = originalPiDirectory;
+  await rm(isolatedPiRoot, { recursive: true, force: true });
+});
+
+async function discoveryFixture(t: TestContext) {
+  const root = await mkdtemp(join(isolatedPiRoot, "case-"));
+  const source = join(root, "source", "pi");
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = source;
+  t.after(() => { process.env.PI_CODING_AGENT_DIR = previous; });
+  const dataDir = join(root, "app");
+  return { root, source, dataDir, configuration: new ModelConfiguration(dataDir) };
+}
 
 async function setup(t: TestContext, configure?: (models: MutableModels) => void) {
   const dataDir = await mkdtemp(join(tmpdir(), "another-you-model-account-"));
@@ -55,7 +76,86 @@ test("目录列出未认证的内置模型，选择和思考深度持久化且�
   for (const name of ["auth.json", "settings.json", "models.json"]) assert.equal((await stat(join(f.directory, name))).mode & 0o777, 0o600);
 });
 
-test("离线读取拒绝环境与命令凭据，不执行认证命令，也不继承 Pi 全局目录", async t => {
+test("API 配置目录提供地址和协议，完整表单保存后重载并保留其他模型及账户", async t => {
+  const f = await setup(t);
+  assert.equal(f.configuration.snapshot.providers.find(provider => provider.id === "openai")?.apiConfiguration?.api, "openai-responses");
+  assert.equal(f.configuration.snapshot.providers.find(provider => provider.id === "amazon-bedrock")?.apiConfiguration, undefined);
+  const previousModels = JSON.parse(await readFile(join(f.directory, "models.json"), "utf8"));
+  const previousAuth = JSON.parse(await readFile(join(f.directory, "auth.json"), "utf8"));
+  f.handler.handle({ op: "modelConfigure", requestId: "configure", provider: " custom-gateway ", baseUrl: " https://api.example.invalid/v1 ",
+    api: "openai-completions", model: " custom-model ", apiKey: " only-in-auth-file-key ", thinkingLevel: "off" });
+  await completed(f.events, "configure");
+  assert.equal(f.backend.status().configured, true);
+  assert.equal(f.backend.status().available, null);
+  assert.equal(f.backend.status().model, "custom-model");
+  const auth = JSON.parse(await readFile(join(f.directory, "auth.json"), "utf8"));
+  const models = JSON.parse(await readFile(join(f.directory, "models.json"), "utf8"));
+  assert.deepEqual(auth["custom-gateway"], { type: "api_key", key: "only-in-auth-file-key" });
+  assert.deepEqual(auth["fixture-provider"], previousAuth["fixture-provider"]);
+  assert.deepEqual(models.providers["fixture-provider"], previousModels.providers["fixture-provider"]);
+  assert.equal(JSON.stringify(models).includes("only-in-auth-file-key"), false);
+  assert.equal(JSON.stringify(f.events).includes("only-in-auth-file-key"), false);
+  await f.backend.reloadModelConfiguration();
+  assert.equal(f.configuration.snapshot.selected?.provider, "custom-gateway");
+  assert.equal(f.configuration.snapshot.providers.find(provider => provider.id === "custom-gateway")?.apiConfiguration?.baseUrl, "https://api.example.invalid/v1");
+  for (const name of ["auth.json", "settings.json", "models.json"]) assert.equal((await stat(join(f.directory, name))).mode & 0o777, 0o600);
+});
+
+test("API 配置保留已有密钥和模型能力，覆盖模型自身的地址和协议", async t => {
+  const f = await setup(t);
+  const path = join(f.directory, "models.json");
+  const models = JSON.parse(await readFile(path, "utf8"));
+  models.providers["fixture-provider"].models[0].baseUrl = "https://old.example.invalid/v1";
+  models.providers["fixture-provider"].models[0].api = "openai-completions";
+  models.providers["fixture-provider"].models.push({ id: "other-model", reasoning: false });
+  await writeFile(path, JSON.stringify(models));
+  await f.backend.reloadModelConfiguration();
+  await f.configuration.configureAPI({ provider: "fixture-provider", baseUrl: "https://new.example.invalid/v1", api: "openai-responses", model: "fixture", apiKey: "", thinkingLevel: "high" });
+  assert.equal(f.configuration.selection?.model.baseUrl, "https://new.example.invalid/v1");
+  assert.equal(f.configuration.selection?.model.api, "openai-responses");
+  assert.equal(f.configuration.selection?.model.reasoning, true);
+  assert.deepEqual(f.configuration.selection?.model.input, ["text", "image"]);
+  assert.equal(f.configuration.selection?.model.contextWindow, 32768);
+  const saved = JSON.parse(await readFile(path, "utf8"));
+  assert.deepEqual(saved.providers["fixture-provider"].models.find((model: { id: string }) => model.id === "other-model"), models.providers["fixture-provider"].models[1]);
+  assert.equal(JSON.parse(await readFile(join(f.directory, "auth.json"), "utf8"))["fixture-provider"].key, "another-you-fixture");
+});
+
+test("API 配置拒绝无效字段、外部密钥和 OAuth 留空，坏输入及取消不改变已存配置", async t => {
+  const f = await setup(t);
+  const paths = ["models.json", "settings.json", "auth.json"].map(name => join(f.directory, name));
+  const before = await Promise.all(paths.map(path => readFile(path, "utf8")));
+  const input = { provider: "custom", baseUrl: "https://api.example.invalid/v1", api: "openai-completions", model: "fixture", apiKey: "fixture-key" };
+  for (const invalid of [
+    { baseUrl: "file:///tmp/fixture" }, { baseUrl: "ftp://example.invalid/v1" }, { baseUrl: "https://user:password@example.invalid/v1" },
+    { baseUrl: "https://example.invalid/v1?key=secret" }, { baseUrl: "https://example.invalid/v1#key" }, { baseUrl: "https://example.invalid/a b" },
+    { api: "unknown-protocol" }, { apiKey: "$ENV_KEY" }, { apiKey: "!touch /tmp/must-not-run" }, { apiKey: " " },
+    { provider: "__proto__" }, { model: " " }, { thinkingLevel: "high" },
+  ]) await assert.rejects(f.configuration.configureAPI({ ...input, ...invalid }));
+  const abort = new AbortController();
+  abort.abort();
+  await assert.rejects(f.configuration.configureAPI(input, abort.signal), { name: "AbortError" });
+  assert.deepEqual(await Promise.all(paths.map(path => readFile(path, "utf8"))), before);
+  await writeFile(join(f.directory, "auth.json"), JSON.stringify({ openai: { type: "oauth", access: "oauth-access", refresh: "oauth-refresh", expires: Date.now() + 60_000 } }));
+  await f.backend.reloadModelConfiguration();
+  await assert.rejects(f.configuration.configureAPI({ ...input, provider: "openai", apiKey: "" }), /API Key/);
+});
+
+test("API 保存后选择失败恢复原配置和凭据，失败回执不泄露新密钥", async t => {
+  const f = await setup(t);
+  const paths = ["models.json", "settings.json", "auth.json"].map(name => join(f.directory, name));
+  const before = await Promise.all(paths.map(async path => JSON.parse(await readFile(path, "utf8"))));
+  f.configuration.select = async () => { throw new Error("保存 failed-private-key 失败"); };
+  f.handler.handle({ op: "modelConfigure", requestId: "rollback", provider: "fixture-provider", baseUrl: "https://api.example.invalid/v1",
+    api: "openai-completions", model: "fixture", apiKey: "failed-private-key", thinkingLevel: "off" });
+  const result = await completed(f.events, "rollback", "failed");
+  assert.match(String(result.payload.message), /已隐藏/);
+  assert.equal(JSON.stringify(f.events).includes("failed-private-key"), false);
+  assert.deepEqual(await Promise.all(paths.map(async path => JSON.parse(await readFile(path, "utf8")))), before);
+  assert.equal(f.backend.status().endpoint, "http://127.0.0.1:1/v1");
+});
+
+test("离线读取拒绝环境与命令凭据，不执行认证命令，也不创建不存在的 Pi 全局目录", async t => {
   assert.equal(hasExternalConfigurationValue("$$literal"), false);
   assert.equal(hasExternalConfigurationValue("$$$ENV_KEY"), true);
   const f = await setup(t);
@@ -82,6 +182,143 @@ test("离线读取拒绝环境与命令凭据，不执行认证命令，也不�
   }
 });
 
+test("无本机 Pi 时保持空配置，之后安装 Pi 可自动发现", async t => {
+  const f = await discoveryFixture(t);
+  await f.configuration.load();
+  assert.equal(f.configuration.snapshot.selected, undefined);
+  assert.equal(f.configuration.snapshot.message, undefined);
+  await assert.rejects(access(f.source));
+  await assert.rejects(access(join(f.configuration.directory, "pi-discovery.json")));
+  await writePiFixture(join(f.root, "source"), "http://127.0.0.1:1/v1", "high");
+  await f.configuration.load();
+  assert.equal(f.configuration.selection?.configured, true);
+  assert.equal(f.configuration.selection?.thinkingLevel, "high");
+});
+
+test("自动读取 Pi 模型、默认选择、每模型思考与账户，兼容官方 JSONC/BOM 且不改源文件", async t => {
+  const f = await discoveryFixture(t);
+  await writePiFixture(join(f.root, "source"), "http://127.0.0.1:1/v1", "low");
+  await writeFile(join(f.source, "settings.json"), '\uFEFF' + JSON.stringify({ defaultProvider: "fixture-provider", defaultModel: "fixture",
+    defaultThinkingLevel: "low", modelThinkingLevels: { "fixture-provider/fixture": "high" }, extensions: ["should-not-import"] }));
+  const models = await readFile(join(f.source, "models.json"), "utf8");
+  await writeFile(join(f.source, "models.json"), '\uFEFF// Pi supports JSON comments\n' + models);
+  await writeFile(join(f.source, "auth.json"), '\uFEFF' + JSON.stringify({ "fixture-provider": { type: "api_key", key: "fixture-pi-key" },
+    "openai-codex": { type: "oauth", access: "fixture-access", refresh: "fixture-refresh", expires: Date.now() + 60_000 } }));
+  const names = ["settings.json", "models.json", "auth.json"];
+  const before = await Promise.all(names.map(name => readFile(join(f.source, name), "utf8")));
+  await f.configuration.load();
+  assert.equal(f.configuration.snapshot.message, undefined);
+  assert.deepEqual(f.configuration.snapshot.selected, { provider: "fixture-provider", model: "fixture", thinkingLevel: "high" });
+  assert.equal(f.configuration.selection?.configured, true);
+  assert.equal(f.configuration.snapshot.providers.find(provider => provider.id === "openai-codex")?.credentialType, "oauth");
+  assert.equal(JSON.stringify(f.configuration.snapshot).includes("fixture-pi-key"), false);
+  assert.equal(JSON.parse(await readFile(join(f.configuration.directory, "settings.json"), "utf8")).extensions, undefined);
+  assert.deepEqual(await Promise.all(names.map(name => readFile(join(f.source, name), "utf8"))), before);
+  for (const name of [...names, "pi-discovery.json"]) assert.equal((await stat(join(f.configuration.directory, name))).mode & 0o777, 0o600);
+});
+
+test("自动发现的 Pi 配置直接用于真实本地 HTTP 请求，无需手动选择或登录", async t => {
+  const f = await discoveryFixture(t);
+  const requests: { model?: string; reasoning_effort?: string; authorization?: string }[] = [];
+  const server = createServer(async (request, response) => {
+    let body = "";
+    for await (const chunk of request) body += chunk;
+    requests.push({ ...JSON.parse(body), authorization: request.headers.authorization });
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.end(`data: ${JSON.stringify({ id: "fixture", choices: [{ index: 0,
+      delta: { role: "assistant", content: "自动配置请求成功" }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`);
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(async () => { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); });
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  await writePiFixture(join(f.root, "source"), `http://127.0.0.1:${address.port}/v1`, "high");
+  const backend = new PiSdkBackend(createDefaultConfig(f.dataDir), undefined, f.configuration);
+  t.after(() => backend.close());
+  await backend.initialize();
+  assert.equal(backend.status().available, null);
+  assert.equal(requests.length, 0);
+  const response = await backend.run({ prompt: "验证自动发现" });
+  assert.equal(response.text, "自动配置请求成功");
+  assert.equal(requests[0].model, "fixture");
+  assert.equal(requests[0].reasoning_effort, "high");
+  assert.equal(requests[0].authorization, "Bearer another-you-fixture");
+});
+
+test("已有应用 provider、账户和选择优先，补全缺失账户不覆盖明确思考深度", async t => {
+  const f = await discoveryFixture(t);
+  await writePiFixture(join(f.root, "source"), "http://127.0.0.1:2/v1", "high");
+  await writeFile(join(f.source, "auth.json"), JSON.stringify({ "fixture-provider": { type: "api_key", key: "source-key" },
+    openai: { type: "api_key", key: "source-openai-key" } }));
+  await writePiFixture(f.dataDir, "http://127.0.0.1:1/v1", "off");
+  await writeFile(join(f.configuration.directory, "settings.json"), JSON.stringify({ defaultProvider: "openai", defaultModel: "gpt-4.4.1",
+    defaultThinkingLevel: "low", modelThinkingLevels: { "fixture-provider/fixture": "off" } }));
+  await f.configuration.load();
+  const settings = JSON.parse(await readFile(join(f.configuration.directory, "settings.json"), "utf8"));
+  const auth = JSON.parse(await readFile(join(f.configuration.directory, "auth.json"), "utf8"));
+  const models = JSON.parse(await readFile(join(f.configuration.directory, "models.json"), "utf8"));
+  assert.equal(settings.defaultProvider, "openai");
+  assert.equal(settings.defaultModel, "gpt-4.4.1");
+  assert.equal(settings.defaultThinkingLevel, "low");
+  assert.equal(settings.modelThinkingLevels["fixture-provider/fixture"], "off");
+  assert.equal(auth["fixture-provider"].key, "another-you-fixture");
+  assert.equal(auth.openai.key, "source-openai-key");
+  assert.equal(models.providers["fixture-provider"].baseUrl, "http://127.0.0.1:1/v1");
+});
+
+test("自动复用后源变更、删除或重启不覆盖应用选择，也不会恢复已注销账户", async t => {
+  const f = await discoveryFixture(t);
+  await writePiFixture(join(f.root, "source"), "http://127.0.0.1:1/v1", "high");
+  await f.configuration.load();
+  await f.configuration.select("fixture-provider", "fixture", "low");
+  await f.configuration.logout("fixture-provider");
+  await writePiFixture(join(f.root, "source"), "http://127.0.0.1:2/v1", "off");
+  const reopened = new ModelConfiguration(f.dataDir);
+  await reopened.load();
+  assert.equal(reopened.selection?.configured, false);
+  assert.equal(reopened.snapshot.selected?.thinkingLevel, "low");
+  assert.equal(JSON.parse(await readFile(join(reopened.directory, "models.json"), "utf8")).providers["fixture-provider"].baseUrl, "http://127.0.0.1:1/v1");
+  await rm(f.source, { recursive: true });
+  await reopened.load();
+  assert.equal(reopened.snapshot.message, undefined);
+  assert.equal(reopened.snapshot.selected?.thinkingLevel, "low");
+});
+
+test("损坏的 Pi 配置不会污染应用，修复后重新读取自动恢复", async t => {
+  const f = await discoveryFixture(t);
+  await writePiFixture(join(f.root, "source"), "http://127.0.0.1:1/v1");
+  for (const name of ["models.json", "settings.json", "auth.json"]) {
+    const before = await readFile(join(f.source, name), "utf8");
+    await writeFile(join(f.source, name), "{ broken");
+    await f.configuration.load();
+    assert.match(f.configuration.snapshot.message ?? "", /本机 Pi 配置/);
+    assert.equal(f.configuration.snapshot.selected, undefined);
+    assert.deepEqual(JSON.parse(await readFile(join(f.configuration.directory, "auth.json"), "utf8")), {});
+    await assert.rejects(access(join(f.configuration.directory, "pi-discovery.json")));
+    await writeFile(join(f.source, name), before);
+  }
+  await f.configuration.load();
+  assert.equal(f.configuration.selection?.configured, true);
+  assert.equal(f.configuration.snapshot.message, undefined);
+});
+
+test("本机 Pi 损坏不禁用应用现有配置，源凭据命令不会执行", async t => {
+  const f = await discoveryFixture(t);
+  await writePiFixture(f.dataDir, "http://127.0.0.1:1/v1");
+  await mkdir(f.source, { recursive: true });
+  await writeFile(join(f.source, "auth.json"), "[]");
+  await f.configuration.load();
+  assert.equal(f.configuration.selection?.configured, true);
+  const marker = join(f.root, "must-not-execute");
+  await writeFile(join(f.source, "auth.json"), JSON.stringify({ openai: { type: "api_key", key: `!touch '${marker}'` } }));
+  await f.configuration.load();
+  assert.equal(f.configuration.snapshot.message, undefined);
+  assert.equal(f.configuration.snapshot.providers.find(provider => provider.id === "openai")?.configured, false);
+  assert.match(f.configuration.snapshot.providers.find(provider => provider.id === "openai")?.configurationIssue ?? "", /命令/);
+  await assert.rejects(access(marker));
+});
+
 test("API key 交互拒绝错误 prompt，保存后注销，认证内容不进入协议目录和历史事件", async t => {
   const f = await setup(t);
   f.handler.handle({ op: "modelLogin", requestId: "key", provider: "fixture-provider", authType: "api_key" });
@@ -101,6 +338,69 @@ test("API key 交互拒绝错误 prompt，保存后注销，认证内容不进�
   assert.equal(f.configuration.snapshot.providers.find(provider => provider.id === "fixture-provider")?.configured, false);
   assert.equal(JSON.parse(await readFile(join(f.directory, "auth.json"), "utf8"))["fixture-provider"], undefined);
 });
+
+test("OAuth 企业域名允许留空，过期 prompt 不影响下一步授权码提交", async t => {
+  let domain: string | undefined;
+  const f = await setup(t, models => {
+    const provider = models.getProvider("fixture-provider")!;
+    models.setProvider({ ...provider, auth: { ...provider.auth, oauth: {
+      name: "Fixture OAuth", login: async (interaction: ProviderAuthInteraction) => {
+        domain = await interaction.prompt({ type: "text", message: "GitHub Enterprise URL/domain (blank for github.com)" });
+        interaction.notify({ type: "device_code", userCode: "ABCD-EFGH", verificationUri: "https://example.invalid/device" });
+        const access = await interaction.prompt({ type: "manual_code", message: "Fixture authorization code" });
+        return { type: "oauth", access, refresh: "fixture-refresh", expires: Date.now() + 60_000 };
+      }, refresh: async credential => credential, toAuth: async credential => ({ apiKey: credential.access }),
+    } } });
+  });
+  f.handler.handle({ op: "modelLogin", requestId: "empty-domain", provider: "fixture-provider", authType: "oauth" });
+  const domainPrompt = await eventMatching(f.events, event => event.kind === "model.auth" && event.payload.stage === "prompt");
+  const domainPromptId = (domainPrompt.payload.prompt as { id: string }).id;
+  f.handler.handle({ op: "modelAuthReply", requestId: "empty-domain", promptId: domainPromptId, value: "" });
+  const codePrompt = await eventMatching(f.events, event => event.kind === "model.auth" && event.payload.stage === "prompt"
+    && (event.payload.prompt as { type: string }).type === "manual_code");
+  assert.equal(domain, "");
+  assert.ok(f.events.some(event => (event.payload.notice as { type?: string } | undefined)?.type === "device_code"));
+  f.handler.handle({ op: "modelAuthReply", requestId: "empty-domain", promptId: domainPromptId, value: "stale-value" });
+  assert.equal(f.events.at(-1)?.payload.state, "failed");
+  assert.equal(f.backend.isBusy, true);
+  f.handler.handle({ op: "modelAuthReply", requestId: "empty-domain", promptId: (codePrompt.payload.prompt as { id: string }).id, value: "fixture-access-code" });
+  await completed(f.events, "empty-domain");
+  assert.equal(f.configuration.snapshot.providers.find(provider => provider.id === "fixture-provider")?.credentialType, "oauth");
+  assert.equal(JSON.stringify(f.events).includes("fixture-access-code"), false);
+});
+
+for (const prompt of [
+  { type: "text", message: "Domain" },
+  { type: "secret", message: "Key" },
+  { type: "manual_code", message: "Code" },
+  { type: "select", message: "Choose", options: [{ id: "valid", label: "Valid" }] },
+] satisfies AuthPrompt[]) {
+  test(`认证 ${prompt.type} 拒绝无效输入并保留原步骤供重试`, async t => {
+    const f = await setup(t, models => {
+      const provider = models.getProvider("fixture-provider")!;
+      models.setProvider({ ...provider, auth: { ...provider.auth, oauth: {
+        name: "Fixture OAuth", login: async (interaction: ProviderAuthInteraction) => {
+          const access = await interaction.prompt(prompt);
+          return { type: "oauth", access, refresh: "fixture-refresh", expires: Date.now() + 60_000 };
+        }, refresh: async credential => credential, toAuth: async credential => ({ apiKey: credential.access }),
+      } } });
+    });
+    f.handler.handle({ op: "modelLogin", requestId: "retry", provider: "fixture-provider", authType: "oauth" });
+    const event = await eventMatching(f.events, event => event.kind === "model.auth" && event.payload.stage === "prompt");
+    const promptId = (event.payload.prompt as { id: string }).id;
+    const invalid = [undefined, 123 as unknown as string, "a".repeat(8193), "😀".repeat(4097),
+      ...(prompt.type === "text" ? [] : ["", " \n\t"]), ...(prompt.type === "select" ? ["missing-option"] : [])];
+    for (const value of invalid) {
+      f.handler.handle({ op: "modelAuthReply", requestId: "retry", promptId, value });
+      assert.equal(f.events.at(-1)?.payload.operation, "modelAuthReply");
+      assert.equal(f.events.at(-1)?.payload.state, "failed");
+      assert.equal(f.backend.isBusy, true);
+      assert.equal(f.events.some(event => event.payload.stage === "promptResolved"), false);
+    }
+    f.handler.handle({ op: "modelAuthReply", requestId: "retry", promptId, value: "valid" });
+    await completed(f.events, "retry");
+  });
+}
 
 test("OAuth 取消结束等待、保留旧账户并解除配置互斥", async t => {
   let loginSignal: AbortSignal | undefined;
@@ -127,6 +427,131 @@ test("OAuth 取消结束等待、保留旧账户并解除配置互斥", async t 
   assert.equal(await readFile(join(f.directory, "auth.json"), "utf8"), before);
   f.handler.handle({ op: "modelSelect", requestId: "after-cancel", provider: "fixture-provider", model: "fixture" });
   await completed(f.events, "after-cancel");
+});
+
+test("所有内置渠道的 API 凭据流程均可逐步配置并保存", async t => {
+  const f = await setup(t);
+  const providers = f.configuration.snapshot.providers.filter(provider => provider.id !== "fixture-provider"
+    && provider.authMethods.some(method => method.type === "api_key"));
+  assert.equal(providers.length, 41);
+  for (const provider of providers) await t.test(provider.id, async () => {
+    const requestId = `builtin-key-${provider.id}`;
+    const answered = new Set<string>();
+    f.handler.handle({ op: "modelLogin", requestId, provider: provider.id, authType: "api_key" });
+    for (let step = 0; step < 6; step++) {
+      const event = await eventMatching(f.events, event => event.payload.requestId === requestId
+        && (event.payload.operation === "modelLogin" && ["succeeded", "failed"].includes(String(event.payload.state))
+          || event.payload.stage === "prompt" && !answered.has((event.payload.prompt as { id: string }).id)));
+      if (event.kind === "model.operation") {
+        assert.equal(event.payload.state, "succeeded", String(event.payload.message));
+        assert.equal(f.configuration.snapshot.providers.find(item => item.id === provider.id)?.configured, true);
+        const credentials = JSON.parse(await readFile(join(f.directory, "auth.json"), "utf8"));
+        assert.equal(credentials[provider.id].key, `fixture-${provider.id}`);
+        return;
+      }
+      const prompt = event.payload.prompt as AuthPrompt & { id: string; required: boolean };
+      answered.add(prompt.id);
+      if (prompt.required) {
+        f.handler.handle({ op: "modelAuthReply", requestId, promptId: prompt.id, value: "" });
+        assert.equal(f.events.at(-1)?.payload.state, "failed");
+      }
+      const value = prompt.type === "select" ? prompt.options[0].id : ` \nfixture-${provider.id}\t `;
+      f.handler.handle({ op: "modelAuthReply", requestId, promptId: prompt.id, value });
+    }
+    assert.fail(`${provider.id} 的登录流程未完成`);
+  });
+});
+
+test("所有内置 OAuth 渠道进入授权流程后均可取消且不写入凭据", async t => {
+  const requests: string[] = [];
+  t.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
+    const url = new URL(input instanceof Request ? input.url : input);
+    requests.push(url.href);
+    if (url.pathname === "/v1/oauth") return Response.json({ authorizationEndpoint: "https://example.invalid/authorize" });
+    if (/device/.test(url.pathname) && !/token/.test(url.pathname)) return Response.json({
+      device_code: "fixture-device", device_auth_id: "fixture-device-auth", user_code: "ABCD-EFGH", verification_uri: "https://example.invalid/device",
+      verification_uri_complete: "https://example.invalid/device?code=ABCD-EFGH", interval: 30, expires_in: 600,
+    });
+    if (/token/.test(url.pathname)) return Response.json({ error: "authorization_pending" }, { status: url.pathname.includes("deviceauth") ? 403 : 400 });
+    throw new Error(`未预期的 OAuth fixture 请求：${url.origin}${url.pathname}`);
+  });
+  const f = await setup(t);
+  const providers = f.configuration.snapshot.providers.filter(provider => provider.authMethods.some(method => method.type === "oauth"));
+  assert.equal(providers.length, 9);
+  const cases = [...providers.map(provider => ({ provider: provider.id, device: false })),
+    { provider: "openai-codex", device: true }, { provider: "radius", device: true }];
+  for (const scenario of cases) await t.test(`${scenario.provider}${scenario.device ? "/device-code" : ""}`, async () => {
+    const requestId = `builtin-oauth-${scenario.provider}-${scenario.device}`;
+    const before = await readFile(join(f.directory, "auth.json"), "utf8");
+    const answered = new Set<string>();
+    f.handler.handle({ op: "modelLogin", requestId, provider: scenario.provider, authType: "oauth" });
+    for (let step = 0; step < 4; step++) {
+      const event = await eventMatching(f.events, event => event.payload.requestId === requestId
+        && (event.payload.operation === "modelLogin" && event.payload.state === "failed"
+          || event.payload.stage === "prompt" && !answered.has((event.payload.prompt as { id: string }).id)
+          || event.payload.stage === "notify" && ["auth_url", "device_code"].includes((event.payload.notice as { type: string }).type)));
+      assert.notEqual(event.payload.state, "failed", String(event.payload.message));
+      if (event.payload.stage === "notify") {
+        const notice = event.payload.notice as { type: string; url?: string; verificationUri?: string; userCode?: string };
+        assert.match(notice.url ?? notice.verificationUri ?? "", /^https?:\/\//);
+        if (notice.type === "device_code") assert.equal(notice.userCode, "ABCD-EFGH");
+        f.handler.handle({ op: "modelAuthCancel", requestId });
+        await completed(f.events, requestId, "cancelled");
+        assert.equal(f.backend.isBusy, false);
+        assert.equal(await readFile(join(f.directory, "auth.json"), "utf8"), before);
+        return;
+      }
+      const prompt = event.payload.prompt as AuthPrompt & { id: string; required: boolean };
+      answered.add(prompt.id);
+      const value = prompt.type === "select" ? prompt.options[scenario.device ? 1 : 0].id : "";
+      assert.equal(prompt.type === "text" && prompt.required, false);
+      f.handler.handle({ op: "modelAuthReply", requestId, promptId: prompt.id, value });
+    }
+    assert.fail(`${scenario.provider} 没有提供授权入口`);
+  });
+  assert.ok(requests.some(url => url.includes("github.com/login/device/code")));
+  assert.equal(JSON.stringify(f.events).includes('"device_code":"fixture-device"'), false);
+});
+
+test("缺少应用可用凭据的渠道不提示已经可以选择模型", async t => {
+  const f = await setup(t);
+  const requestId = "bedrock-ambient";
+  f.handler.handle({ op: "modelLogin", requestId, provider: "amazon-bedrock", authType: "api_key" });
+  const selection = await eventMatching(f.events, event => event.payload.requestId === requestId && event.payload.stage === "prompt");
+  f.handler.handle({ op: "modelAuthReply", requestId, promptId: (selection.payload.prompt as { id: string }).id, value: "credential-chain" });
+  const confirmation = await eventMatching(f.events, event => event.payload.requestId === requestId && event.payload.stage === "prompt"
+    && (event.payload.prompt as { type: string }).type === "text");
+  assert.equal((confirmation.payload.prompt as { required: boolean }).required, false);
+  f.handler.handle({ op: "modelAuthReply", requestId, promptId: (confirmation.payload.prompt as { id: string }).id, value: "" });
+  const result = await completed(f.events, requestId);
+  assert.equal(f.configuration.snapshot.providers.find(provider => provider.id === "amazon-bedrock")?.configured, false);
+  assert.equal(result.payload.message, "账户信息已保存，但凭据尚不可用，请检查配置或更换登录方式");
+});
+
+test("AWS 和 Google Cloud 的附加账户字段必须填写，未解析的本机凭据会明确提示", async t => {
+  const f = await setup(t);
+  for (const scenario of [
+    { provider: "amazon-bedrock", method: "aws-profile", fields: ["work-profile"], configured: true },
+    { provider: "google-vertex", method: "adc", fields: ["project-id", "us-central1"], configured: false },
+    { provider: "google-vertex", method: "service-account", fields: ["project-id", "us-central1", "/nonexistent/service-account.json"], configured: false },
+  ]) await t.test(`${scenario.provider}/${scenario.method}`, async () => {
+    const requestId = `cloud-${scenario.method}`;
+    const answered = new Set<string>();
+    f.handler.handle({ op: "modelLogin", requestId, provider: scenario.provider, authType: "api_key" });
+    for (const value of [scenario.method, ...scenario.fields]) {
+      const event = await eventMatching(f.events, event => event.payload.requestId === requestId && event.payload.stage === "prompt"
+        && !answered.has((event.payload.prompt as { id: string }).id));
+      const prompt = event.payload.prompt as AuthPrompt & { id: string; required: boolean };
+      answered.add(prompt.id);
+      assert.equal(prompt.required, true);
+      f.handler.handle({ op: "modelAuthReply", requestId, promptId: prompt.id, value: " \t" });
+      assert.equal(f.events.at(-1)?.payload.state, "failed");
+      f.handler.handle({ op: "modelAuthReply", requestId, promptId: prompt.id, value });
+    }
+    const result = await completed(f.events, requestId);
+    assert.equal(f.configuration.snapshot.providers.find(provider => provider.id === scenario.provider)?.configured, scenario.configured);
+    assert.equal(result.payload.message, scenario.configured ? "账户已保存，请选择模型" : "账户信息已保存，但凭据尚不可用，请检查配置或更换登录方式");
+  });
 });
 
 test("目录刷新使用 SDK 发布结果；部分失败仍向客户端发布最新目录", async t => {

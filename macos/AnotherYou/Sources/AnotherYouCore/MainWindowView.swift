@@ -18,7 +18,6 @@ public struct MainWindowView: View {
     private let store: AssistantStore
     @State private var selectedItem: SidebarItem = .today
     @Environment(\.openWindow) private var openWindow
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     public init(store: AssistantStore) { self.store = store }
 
@@ -26,19 +25,15 @@ public struct MainWindowView: View {
         NavigationSplitView {
             SidebarView(selection: $selectedItem) { openWindow(id: "settings") }
         } detail: {
-            ZStack {
-                Group {
-                    switch selectedItem {
-                    case .today: DashboardView(store: store) { selectedItem = .conversation }
-                    case .conversation: ConversationWorkspaceView(store: store)
-                    case .history: ActivityLogView(store: store)
-                    }
+            Group {
+                switch selectedItem {
+                case .today: DashboardView(store: store)
+                case .conversation: ConversationWorkspaceView(store: store)
+                case .history: ActivityLogView(store: store)
                 }
-                .id(selectedItem)
-                .transition(.opacity)
             }
+            .id(selectedItem)
         }
-        .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: selectedItem)
         .navigationSplitViewStyle(.balanced)
         .frame(minWidth: 780, minHeight: 580)
         .task { store.connect() }
@@ -48,15 +43,17 @@ public struct MainWindowView: View {
 @MainActor
 private struct SidebarView: View {
     @Environment(\.locale) private var interfaceLocale
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Binding var selection: SidebarItem
     let onSettings: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 10) {
-                Image(systemName: "circle.lefthalf.filled")
-                    .font(.system(size: 28, weight: .light))
-                    .foregroundStyle(Color.anotherAccent)
+                AppLogo()
+                    .frame(width: 32, height: 32)
+                    .clipShape(RoundedRectangle(cornerRadius: 7))
+                    .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Another You").font(.system(size: 15, weight: .semibold, design: .rounded))
                     Text(AppLocalization.text("把主动，留给恰好的时刻")).font(.system(size: 10)).foregroundStyle(.secondary)
@@ -72,16 +69,28 @@ private struct SidebarView: View {
                             .foregroundStyle(selection == item ? Color.anotherInk : .secondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.horizontal, 13).padding(.vertical, 10)
-                            .background(selection == item ? Color.anotherAccent.opacity(0.10) : .clear, in: RoundedRectangle(cornerRadius: 10))
+                            .background {
+                                RoundedRectangle(cornerRadius: 10)
+                                    .fill(selection == item ? Color.anotherAccent.opacity(0.10) : .clear)
+                                    .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: selection == item)
+                                    .allowsHitTesting(false)
+                            }
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
+                    .accessibilityAddTraits(selection == item ? .isSelected : [])
                 }
             }
             .padding(.horizontal, 12)
             Spacer()
-            Button(action: onSettings) { Label(AppLocalization.text("设置"), systemImage: "slider.horizontal.3") }
-                .buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(.secondary)
-                .padding(20)
+            Button(action: onSettings) {
+                Label(AppLocalization.text("设置"), systemImage: "slider.horizontal.3")
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(20)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
         }
         .frame(minWidth: 205, idealWidth: 228, maxWidth: 250)
         .background(Color.anotherSidebar)
@@ -92,16 +101,15 @@ private struct SidebarView: View {
 private struct DashboardView: View {
     @Environment(\.locale) private var interfaceLocale
     @ObservedObject var store: AssistantStore
-    let onConversation: () -> Void
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 26) {
                 UsageDashboardView(store: store)
-                ConversationBoardView(store: store, onOpen: onConversation)
+                ActivityDashboardView(store: store)
             }
             .frame(maxWidth: 980, alignment: .leading)
-            .padding(30).frame(maxWidth: .infinity)
+            .padding(30).frame(maxWidth: .infinity, alignment: .leading)
         }.background(Color.anotherCanvas)
     }
 }
@@ -215,8 +223,13 @@ public struct SettingsView: View {
                         Label(AppLocalization.text(item.rawValue), systemImage: item.icon)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.horizontal, 12).padding(.vertical, 10)
-                            .background(page == item ? Color.accentColor.opacity(0.12) : .clear,
-                                        in: RoundedRectangle(cornerRadius: 8))
+                            .background {
+                                RoundedRectangle(cornerRadius: 8)
+                                    .fill(page == item ? Color.accentColor.opacity(0.12) : .clear)
+                                    .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: page == item)
+                                    .allowsHitTesting(false)
+                            }
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .accessibilityAddTraits(page == item ? .isSelected : [])
@@ -240,11 +253,9 @@ public struct SettingsView: View {
                 }
                 .formStyle(.grouped)
                 .id(page)
-                .transition(.opacity)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: page)
         .frame(minWidth: 680, minHeight: 520)
         .background(LocalizedWindowTitle(key: "设置").frame(width: 0, height: 0))
         .task { updates.start() }
@@ -281,7 +292,7 @@ public struct SettingsView: View {
                 if !store.notificationSupported { Text(AppLocalization.text("系统通知需要从 Another You.app 启动。")).font(.caption).foregroundStyle(.secondary) }
                 if let message = store.notificationMessage { Text(AppLocalization.text(message)).font(.caption).foregroundStyle(.secondary) }
             } header: { Text(AppLocalization.text("介入方式")) }
-            ProactiveContextSettingsView(session: store.proactiveContext, paused: store.paused)
+            ProactiveContextSettingsView(session: store.proactiveContext, desktop: store.desktop, paused: store.paused)
         }
     }
 

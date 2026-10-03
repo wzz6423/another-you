@@ -54,15 +54,17 @@ Each command below carries its own `requestId`:
 | --- | --- | --- |
 | `modelCatalog` | Optional `refresh: true` | Read the local catalog; explicit refresh requests catalogs for configured providers. |
 | `modelSelect` | `provider`, `model`; optional `thinkingLevel` | Save the Pi default model and a supported thinking level. |
+| `modelConfigure` | `provider`, `baseUrl`, `api`, `model`; optional `apiKey`, `thinkingLevel` | Validate and merge API configuration, store the key separately, and select the model. Supports `openai-completions`, `openai-responses`, and `anthropic-messages`. An omitted or blank key retains only an existing usable API-key credential; saving does not test connectivity. |
+| `modelTest` | None | Send a short request to the saved model without tools or conversation context and report the actual connection outcome. |
 | `modelLogin` | `provider`, `authType: api_key / oauth` | Start an interactive Pi authentication flow. |
-| `modelAuthReply` | Login `requestId`, `promptId`, `value` | Answer the current prompt; invalid or stale prompts do not end the original login. |
+| `modelAuthReply` | Login `requestId`, `promptId`, `value` | Answer the current prompt: text follows prompt.required (optional text accepts an empty string), secret/manual_code reject blank values, and select must match an option. Non-selection input is trimmed before submission. Invalid or stale prompts do not end the original login. |
 | `modelAuthCancel` | Current operation's `requestId` | Cancel an account operation or catalog refresh. |
 | `modelLogout` | `provider` | Remove the provider's isolated account credential. |
 | `modelImport` | Absolute `path` | Import model definitions and defaults without importing credentials. |
 
-`model.catalog` returns `models`, `providers`, optional `selected`, and `message`. `model.operation` reports `operation` and `state` (`started`, `succeeded`, `failed`, `cancelled`); sending a command does not confirm persistence. `model.auth` carries `requestId`, `provider`, and a `stage` of `prompt`, `promptResolved`, `promptCancelled`, or `notify`. Prompt types follow Pi: `text`, `secret`, `manual_code`, and `select`; selection replies contain the option's `id`.
+`model.catalog` returns `models`, `providers`, optional `selected`, and `message`. Providers supporting the API form also include `apiConfiguration: { baseUrl, api }`, with credentials, query parameters, and fragments removed from the URL and no API key returned. `model.operation` reports `operation` and `state` (`started`, `succeeded`, `failed`, `cancelled`); sending a command does not confirm persistence. `model.auth` carries `requestId`, `provider`, and a `stage` of `prompt`, `promptResolved`, `promptCancelled`, or `notify`. Prompt types follow Pi: `text`, `secret`, `manual_code`, and `select`; selection replies contain the option's `id`.
 
-Configuration changes, login, and refresh are mutually exclusive with each other and with model requests. Local catalog reads remain available. Authentication has a ten-minute deadline; catalog refresh has a twenty-second deadline. EOF, shutdown, or disconnect cancels pending authentication. Authentication content uses only the live transport and never enters the EventBus, conversation, or state history. Real-provider login and model compatibility require separate verification.
+Configuration changes, login, refresh, and connection tests are mutually exclusive with each other and with model requests. Local catalog reads remain available. Authentication has a ten-minute deadline; catalog refresh has a twenty-second deadline. Connection tests have a sixty-second deadline and can be cancelled with `modelAuthCancel`. EOF, shutdown, or disconnect cancels pending authentication and connection tests. Authentication content uses only the live transport and never enters the EventBus, conversation, or state history. Real-provider login and model compatibility require separate verification.
 
 ## Conversations and activity
 
@@ -132,12 +134,13 @@ Every event has `id`, `occurredAt` (ISO timestamp), `kind`, `source`, and `paylo
 
 | `kind` | Main payload fields |
 | --- | --- |
-| `agent.status` | `configPath`, `paused`, `schedulerEnabled`, `model`, `proactive`, `rules`, `proposals`, `history`, `usageRecords` |
+| `agent.status` | `configPath`, `paused`, `schedulerEnabled`, `model`, `proactive`, `rules`, `proposals`, `history`, `usageRecords`, `activityRecords` |
 | `scheduler.status` | `running`, and where supplied `paused` |
 | `proactive.status` | `taskId`, `running`, `tasks`, `sources`, `intervals` |
 | `context.request` / `context.cancel` | `requestId`, `source`; request or cancel work/notification collection |
 | `proactive.suggestion` | `suggestionId`, `ruleId`, `title`, `message`, `summary`, `reason`, `createdAt`, `state`, `trigger`, `context`, `signal` |
-| `agent.request` | `requestId`, `prompt` |
+| `agent.request` | `requestId`, `conversationId`, `prompt`, optional `appName` |
+| `activity.recorded` | `kind` (`prompt` / `suggestion`), optional `appName`; outer `id` and `occurredAt` identify and timestamp the statistics record |
 | `agent.usage` | `source`, `model`, `outcome`, optional `usage`, `reasoningEffort`, `toolCalls` |
 | `agent.response` | `requestId`, `text`, `model` |
 | `proposal.updated` | `suggestionId`, `decision`, `state`; optional `text`, `snoozedUntil` |

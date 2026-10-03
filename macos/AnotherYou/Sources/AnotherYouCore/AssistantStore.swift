@@ -17,6 +17,7 @@ final class InputDraft: ObservableObject {
 public final class AssistantStore: ObservableObject {
     @Published public private(set) var cards: [ProactiveCard] = []
     @Published public private(set) var usageRecords: [UsageRecord] = []
+    @Published private(set) var activityRecords: [ActivityRecord] = []
     @Published public private(set) var history: [AgentEvent] = []
     private var historyPrunedAt = Date.distantPast
     @Published public private(set) var conversation: [ConversationMessage] = []
@@ -58,11 +59,17 @@ public final class AssistantStore: ObservableObject {
     private let agent: any AgentClient
     private let repository: AgentSettingsRepository
     private let defaults: UserDefaults
+    private let proactivePermissions: any ProactivePermissionAuthorizing
+    private var permissionTask: Task<Void, Never>?
+    private var hasCheckedNotificationPermission = false
+    private var notificationRequestID = UUID()
+    private var schedulerEnabled = true
     private var idleTask: Task<Void, Never>?
     private var hasSentLaunchSignal = false
     private var isShuttingDown = false
     private var hasActiveBackgroundAnalysis = false
     private var desktopObservation: AnyCancellable?
+    private var activationObservation: AnyCancellable?
 
     public init(
         client: any AgentClient = ProcessAgentClient(),
@@ -70,16 +77,18 @@ public final class AssistantStore: ObservableObject {
         defaults: UserDefaults = .standard,
         updater: UpdateController? = nil,
         desktop: DesktopSession = DesktopSession(),
-        contextCollector: any ContextCollecting = SystemContextCollector()
+        contextCollector: any ContextCollecting = SystemContextCollector(),
+        proactivePermissions: any ProactivePermissionAuthorizing = SystemProactivePermissions()
     ) {
         self.agent = client
         self.repository = repository
         self.defaults = defaults
+        self.proactivePermissions = proactivePermissions
         self.desktop = desktop
         proactiveContext = ProactiveContextSession(collector: contextCollector)
         appearance = AppAppearance(rawValue: defaults.string(forKey: "appearance") ?? "") ?? .system
         updates = updater ?? UpdateController(defaults: defaults)
-        notificationsEnabled = defaults.bool(forKey: "notificationsEnabled")
+        notificationsEnabled = defaults.object(forKey: "notificationsEnabled") as? Bool ?? true
         agent.onMessage = { [weak self] message in self?.receive(message) }
         updates.isIdle = { [weak self] in self?.canInstallUpdate == true }
         desktop.canStartOperation = { [weak self] in
@@ -89,7 +98,10 @@ public final class AssistantStore: ObservableObject {
         desktopObservation = desktop.objectWillChange.sink { [weak self] in
             self?.scheduleUpdateInstallation()
         }
+        activationObservation = NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)
+            .sink { [weak self] _ in self?.prepareProactivePermissionsIfNeeded() }
         modelSettings.sendCommand = { [weak self] command in self?.send(command) == true }
+        modelSettings.openAuthenticationURL = { NSWorkspace.shared.open($0) }
         modelSettings.canStartOperation = { [weak self] in
             guard let self else { return false }
             return self.isConnected && !self.hasPendingPrompt && !self.hasActiveBackgroundAnalysis
@@ -140,7 +152,7 @@ public final class AssistantStore: ObservableObject {
         DispatchQueue.main.async { [weak self] in self?.updates.installWhenIdle() }
     }
     public var notificationSupported: Bool {
-        Bundle.main.bundleURL.pathExtension == "app" && Bundle.main.bundleIdentifier != nil
+        proactivePermissions.supported
     }
     public var activeCards: [ProactiveCard] { cards.filter { $0.state != .ignored && !$0.archived } }
     public var nextDueDate: Date? { cards.filter { $0.state == .snoozed }.compactMap(\.snoozedUntil).min() }
@@ -165,6 +177,8 @@ public final class AssistantStore: ObservableObject {
 
     public func shutdown() async {
         isShuttingDown = true
+        notificationRequestID = UUID()
+        permissionTask?.cancel()
         proactiveContext.cancel()
         desktop.cancel()
         idleTask?.cancel()
@@ -347,6 +361,12 @@ public final class AssistantStore: ObservableObject {
     }
 
     public func setNotificationsEnabled(_ enabled: Bool) async {
+        await updateNotificationPreference(enabled, automatic: false)
+    }
+
+    private func updateNotificationPreference(_ enabled: Bool, automatic: Bool) async {
+        let requestID = UUID()
+        notificationRequestID = requestID
         guard enabled else {
             notificationsEnabled = false
             defaults.set(false, forKey: "notificationsEnabled")
@@ -357,12 +377,53 @@ public final class AssistantStore: ObservableObject {
             notificationMessage = "系统通知需要从 Another You.app 启动。"
             return
         }
+        notificationsEnabled = true
+        defaults.set(true, forKey: "notificationsEnabled")
         do {
-            let granted = try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound])
+            let authorization = await proactivePermissions.notificationAuthorization()
+            guard notificationRequestID == requestID, !Task.isCancelled, !isShuttingDown else { return }
+            let granted: Bool
+            switch authorization {
+            case .notDetermined:
+                guard proactivePermissions.canPresentPrompt else { return }
+                if automatic && (paused || !schedulerEnabled || !proactiveContext.enabled || !isConnected) { return }
+                granted = try await proactivePermissions.requestNotifications()
+            case .authorized, .provisional: granted = true
+            default: granted = false
+            }
+            guard notificationRequestID == requestID, !Task.isCancelled, !isShuttingDown else { return }
+            hasCheckedNotificationPermission = true
             notificationsEnabled = granted
             defaults.set(granted, forKey: "notificationsEnabled")
             notificationMessage = granted ? nil : "通知权限未开启，可前往 macOS 系统设置调整。"
-        } catch { notificationMessage = error.localizedDescription }
+        } catch {
+            guard notificationRequestID == requestID, !Task.isCancelled, !isShuttingDown else { return }
+            hasCheckedNotificationPermission = true
+            notificationsEnabled = false
+            defaults.set(false, forKey: "notificationsEnabled")
+            notificationMessage = "通知权限未开启，可前往 macOS 系统设置调整。"
+        }
+    }
+
+    private func prepareProactivePermissionsIfNeeded() {
+        guard notificationSupported, proactivePermissions.canPresentPrompt, isConnected,
+              schedulerEnabled, proactiveContext.enabled, !paused, !isShuttingDown, permissionTask == nil else { return }
+        permissionTask = Task { [weak self] in
+            guard let self else { return }
+            defer { permissionTask = nil }
+            if notificationsEnabled, !hasCheckedNotificationPermission {
+                await updateNotificationPreference(true, automatic: true)
+            }
+            guard !Task.isCancelled, !isShuttingDown, proactivePermissions.canPresentPrompt, isConnected, schedulerEnabled,
+                  proactiveContext.enabled, !paused else { return }
+            // 辅助功能 API 无法区分尚未申请和已拒绝，只自动弹出一次。
+            if !proactivePermissions.accessibilityGranted, !defaults.bool(forKey: "proactiveAccessibilityRequested") {
+                defaults.set(true, forKey: "proactiveAccessibilityRequested")
+                do { try await proactivePermissions.requestAccessibility() }
+                catch { statusMessage = error.localizedDescription }
+            }
+            desktop.refreshPermissions()
+        }
     }
 
     private func receive(_ message: AgentClientMessage) {
@@ -427,6 +488,7 @@ public final class AssistantStore: ObservableObject {
         case "agent.status":
             consumeSessions(payload)
             if let status = payload["proactive"]?.object { proactiveContext.update(status) }
+            schedulerEnabled = payload["schedulerEnabled"]?.bool ?? true
             hasActiveBackgroundAnalysis = payload["proactive"]?.object?["running"]?.bool ?? false
             setIfChanged(\.paused, to: payload["paused"]?.bool ?? !(payload["schedulerEnabled"]?.bool ?? true))
             if paused { proactiveContext.cancel() }
@@ -453,7 +515,13 @@ public final class AssistantStore: ObservableObject {
                let decoded = try? JSONDecoder().decode([UsageRecord].self, from: data) {
                 setIfChanged(\.usageRecords, to: decoded)
             }
+            if let records = payload["activityRecords"]?.array,
+               let data = try? JSONEncoder().encode(records),
+               let decoded = try? JSONDecoder().decode([ActivityRecord].self, from: data) {
+                setIfChanged(\.activityRecords, to: ActivityRecord.retained(decoded))
+            }
             setIfChanged(\.statusMessage, to: paused ? "主动建议已暂停" : "正在按节奏留意工作与通知")
+            prepareProactivePermissionsIfNeeded()
         case "conversation.messages": consumeConversationMessages(payload)
         case "conversation.updated":
             consumeSessions(payload)
@@ -473,6 +541,11 @@ public final class AssistantStore: ObservableObject {
                     conversationDrafts.removeValue(forKey: id)
                     history.removeAll { $0.payload["conversationId"]?.string == id || $0.payload["suggestionId"]?.string == id }
                 }
+            }
+        case "activity.recorded":
+            if let kind = payload["kind"]?.string.flatMap(ActivityRecord.Kind.init(rawValue:)) {
+                let record = ActivityRecord(id: event.id, occurredAt: event.occurredAt, kind: kind, appName: payload["appName"]?.string)
+                setIfChanged(\.activityRecords, to: ActivityRecord.retained(activityRecords + [record]))
             }
         case "agent.activity", "agent.request": mergeHistory([event])
         case "agent.usage":

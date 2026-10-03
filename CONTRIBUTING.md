@@ -24,6 +24,8 @@ make test
 
 The Node tests use local HTTP fixtures; they need no real API key or downloaded model. Swift tests include the real Node sidecar, so install Agent dependencies before running them. Use `make test-agent`, `make test-swift`, or `make test-scripts` for focused checks.
 
+`make test-agent` and `make test-swift` isolate Pi discovery in a temporary directory and clean it on exit, so tests do not read personal Pi accounts. For a direct filtered test command, use the same entry point: `./scripts/run-isolated-tests.sh ./scripts/xcode-toolchain.sh test --package-path macos/AnotherYou --filter LocalizationTests`.
+
 ## Keep changes focused
 
 - Read the relevant implementation and reuse existing helpers and patterns before changing it.

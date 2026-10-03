@@ -5,6 +5,7 @@ umask 077
 repo_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 run_dir="${repo_dir}/dist/dev"
 app_path="${run_dir}/Another You.app"
+symbols_path="${app_path}.dSYM"
 app_binary="${app_path}/Contents/MacOS/AnotherYou"
 state_file="${run_dir}/process"
 log_file="${run_dir}/another-you.log"
@@ -104,11 +105,13 @@ cleanup() {
 start_instance() {
   local pid started attempt
   staging_dir="$(mktemp -d "${run_dir}/.build.XXXXXX")"
-  OUTPUT_DIRECTORY="$staging_dir" "${repo_dir}/scripts/build-app.sh"
+  CONFIGURATION=debug ANOTHER_YOU_UPDATES_ENABLED=0 OUTPUT_DIRECTORY="$staging_dir" "${repo_dir}/scripts/build-app.sh"
   [[ -x "${staging_dir}/Another You.app/Contents/MacOS/AnotherYou" ]] || fail "构建未生成 Another You.app 可执行文件。"
+  [[ -s "${staging_dir}/Another You.app.dSYM/Contents/Resources/DWARF/AnotherYou" ]] || fail "构建未生成 Debug 调试符号。"
   stop_instance
-  rm -rf -- "$app_path"
+  rm -rf -- "$app_path" "$symbols_path"
   mv "${staging_dir}/Another You.app" "$app_path"
+  mv "${staging_dir}/Another You.app.dSYM" "$symbols_path"
   rm -f -- "$log_file"
   nohup "$app_binary" </dev/null >"$log_file" 2>&1 &
   pending_pid=$!
@@ -130,7 +133,7 @@ start_instance() {
   sleep 0.5
   process_matches "$pid" "$started" "$app_binary" || fail "开发应用启动后退出，请查看：$log_file"
   pending_pid=""
-  printf 'Another You 开发应用已启动（PID %s）。停止：make stop\n日志：%s\n' "$pid" "$log_file"
+  printf 'Another You Debug 已启动（PID %s）。停止：make stop\n日志：%s\n' "$pid" "$log_file"
 }
 
 clean_outputs() {
@@ -139,8 +142,8 @@ clean_outputs() {
     require_real_directory "$directory"
   done
   stop_instance
-  rm -rf -- "$app_path" "$log_file" "${run_dir}"/.build.* "${run_dir}"/.process.* \
-    "${repo_dir}/dist/macos/Another You.app" \
+  rm -rf -- "$app_path" "$symbols_path" "$log_file" "${run_dir}"/.build.* "${run_dir}"/.process.* \
+    "${repo_dir}/dist/macos/Another You.app" "${repo_dir}/dist/macos/Another You.app.dSYM" \
     "${repo_dir}/macos/AnotherYou/.build" "${repo_dir}/agent-core/coverage"
   rmdir "${repo_dir}/dist/macos" 2>/dev/null || true
   printf '已清理开发应用和构建、测试产物；个人数据、依赖和 Pi 源码缓存保留。\n'

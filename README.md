@@ -33,7 +33,7 @@ make deps
 make run
 ```
 
-`make run` builds and starts `dist/dev/Another You.app`. Configure models, including local models, in Pi. Press Ctrl+S in Pi’s `/model` picker to save the default, then click **重新读取 Pi 配置** under **设置 → 模型**. Another You uses Pi’s authentication and model settings directly.
+`make run` builds and starts `dist/dev/Another You.app` in Debug mode, displayed as **Another You Debug** in macOS. It uses a separate bundle identifier and `~/Library/Application Support/AnotherYouDebug/` data directory; `ANOTHER_YOU_DATA_DIR` overrides that path. Configure models, including local models, in Pi. Press Ctrl+S in Pi’s `/model` picker to save the default, then click **重新读取 Pi 配置** under **设置 → 模型**. Another You uses Pi’s authentication and model settings directly.
 
 A saved configuration is not a connection test. Submit a prompt or approve a draft to verify your model; failures appear in the app.
 
@@ -50,11 +50,11 @@ Run `make help` for the available targets.
 
 | Command | Purpose |
 | --- | --- |
-| `make build` | Build the Swift executable. |
+| `make build` | Compile the Debug Swift executable without packaging or launching. |
 | `make check` | Check TypeScript, website JavaScript, and shell syntax. |
 | `make test` | Run Agent, Swift, development-script, and release-tool tests. |
 | `make test-release` | Verify release signatures, metadata, and the two-host upload flow. |
-| `make build-package` | Build a separate development `.app` in `dist/macos`. |
+| `make build-package` | Package a Release `.app` in `dist/macos` without launching it. |
 | `make website` | Serve the static website at `http://127.0.0.1:4173`. |
 | `make pi-source` | Fetch the pinned upstream source into `agent-core/.cache/pi`. |
 | `make clean` | Stop the managed development app and remove known build/test outputs. |

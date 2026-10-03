@@ -7,6 +7,13 @@ bundle_node="${BUNDLE_NODE:-1}"
 build_arch="${BUILD_ARCH:-$(uname -m)}"
 node_path="${ANOTHER_YOU_NODE:-}"
 runtime_cache="${ANOTHER_YOU_RUNTIME_CACHE:-${repo_dir}/agent-core/.cache/runtime}"
+configuration="${CONFIGURATION:-release}"
+
+case "$configuration" in
+  debug|release) ;;
+  *) echo "CONFIGURATION 必须为 debug 或 release。" >&2; exit 1 ;;
+esac
+export CONFIGURATION="$configuration"
 
 if [[ "$(uname -s)" != Darwin ]]; then
   echo "应用打包需要 macOS。" >&2
@@ -27,7 +34,8 @@ fi
 mkdir -p "$output_dir"
 output_dir="$(cd -- "$output_dir" && pwd)"
 app_path="${output_dir}/Another You.app"
-if [[ -e "$app_path" ]]; then
+symbols_path="${app_path}.dSYM"
+if [[ -e "$app_path" || -L "$app_path" || -e "$symbols_path" || -L "$symbols_path" ]]; then
   echo "输出已存在，请指定新的 OUTPUT_DIRECTORY：$app_path" >&2
   exit 1
 fi
@@ -92,7 +100,7 @@ resources="${staged_app}/Contents/Resources"
 mkdir -p "${staged_app}/Contents/MacOS" "${resources}/agent-core"
 
 swift_build=("${repo_dir}/scripts/xcode-toolchain.sh" build --package-path "${repo_dir}/macos/AnotherYou"
-  --scratch-path "${build_dir}/swift" -c release --arch "$build_arch")
+  --scratch-path "${build_dir}/swift" -c "$configuration" --arch "$build_arch")
 "${swift_build[@]}" --product AnotherYou -Xlinker -rpath -Xlinker @executable_path/../Frameworks
 bin_dir="$("${swift_build[@]}" --show-bin-path)"
 linked_sdk_version="$(xcrun vtool -show-build "${bin_dir}/AnotherYou" | awk '$1 == "sdk" && !found { print $2; found = 1 }')"
@@ -101,9 +109,18 @@ if [[ "$linked_sdk_version" != "$sdk_version" ]]; then
   exit 1
 fi
 cp "${bin_dir}/AnotherYou" "${staged_app}/Contents/MacOS/AnotherYou"
+if [[ "$configuration" == debug ]]; then
+  # scratch 会在退出时清理，先把调试映射中的对象文件合并到独立符号包。
+  xcrun dsymutil "${bin_dir}/AnotherYou" -o "${build_dir}/Another You.app.dSYM"
+fi
 if [[ -d "${bin_dir}/AnotherYou_AnotherYouCore.bundle" ]]; then
   cp -R "${bin_dir}/AnotherYou_AnotherYouCore.bundle" "$resources/"
 fi
+icon_name="AppIcon"
+if [[ "$configuration" == debug ]]; then
+  icon_name="AppIconDark"
+fi
+cp "${repo_dir}/macos/AnotherYou/Sources/AnotherYouCore/Resources/${icon_name}.icns" "${resources}/AppIcon.icns"
 cp -R "${repo_dir}/agent-core/src" "${resources}/agent-core/src"
 cp "${repo_dir}/agent-core/package.json" "${repo_dir}/agent-core/package-lock.json" "${repo_dir}/agent-core/pi-source.lock.json" "${resources}/agent-core/"
 (
@@ -167,8 +184,11 @@ python3 "${repo_dir}/scripts/release.py" prepare-bundle \
   --app "$staged_app" --framework "$framework" --arch "$build_arch" \
   --sparkle-license "$(dirname -- "$sparkle_artifact")/LICENSE"
 plutil -lint "${staged_app}/Contents/Info.plist"
+if [[ "$configuration" == debug ]]; then
+  mv "${build_dir}/Another You.app.dSYM" "$symbols_path"
+fi
 mv "$staged_app" "$app_path"
-printf '应用已生成（此步骤不执行公证）：%s\n' "$app_path"
+printf '%s 应用已生成（此步骤不执行公证）：%s\n' "$configuration" "$app_path"
 if [[ "$bundle_node" == 0 ]]; then
   echo "此应用依赖本机 Node 22.19+，不适合直接分发。"
 fi

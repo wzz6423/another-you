@@ -73,6 +73,7 @@ public final class ProactiveContextSession: ObservableObject {
 struct ProactiveContextSettingsView: View {
     @Environment(\.locale) private var interfaceLocale
     @ObservedObject var session: ProactiveContextSession
+    @ObservedObject var desktop: DesktopSession
     let paused: Bool
 
     var body: some View {
@@ -84,10 +85,7 @@ struct ProactiveContextSettingsView: View {
                 LabeledContent(AppLocalization.text("通知 · 每 %d 分钟", session.minutes("notificationsIntervalMs", fallback: 3)), value: session.stateLabel("notifications"))
                 LabeledContent(AppLocalization.text("汇总分析 · 每 %d 分钟", session.minutes("synthesisIntervalMs", fallback: 10)), value: session.stateLabel("synthesis"))
             }
-            Text(AppLocalization.text("仅在有值得处理的新变化时建议，提醒至少间隔 %d 分钟。", session.minutes("suggestionCooldownMs", fallback: 15)))
-                .font(.caption).foregroundStyle(.secondary)
-            Text(AppLocalization.text("需允许辅助功能访问；通知仅限当前可读取的内容，可能遗漏已消失的通知。"))
-                .font(.caption).foregroundStyle(.secondary)
+            DesktopPermissionRow(session: desktop, permission: "accessibility", title: "辅助功能")
         }
     }
 }

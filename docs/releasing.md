@@ -12,7 +12,7 @@ Use full Xcode 27+ with the macOS 27+ SDK and Python 3. Default packaging prepar
 make build-package
 ```
 
-[scripts/build-app.sh](../scripts/build-app.sh) builds the Swift executable in release mode using a temporary scratch directory, copies the sidecar source, locked production npm dependencies, and Sparkle 2.9.4, writes `Info.plist`, applies ad-hoc signing, and verifies the bundle. It removes its temporary build directory on exit.
+[scripts/build-app.sh](../scripts/build-app.sh) builds the Swift executable in Release mode by default using a temporary scratch directory, copies the sidecar source, locked production npm dependencies, and Sparkle 2.9.4, writes `Info.plist`, applies ad-hoc signing, and verifies the bundle. It removes its temporary build directory on exit.
 
 Builds use the full Xcode selected by `DEVELOPER_DIR` or `xcode-select`; an older Xcode or Command Line Tools fails before compilation. The executable records the selected SDK in `LC_BUILD_VERSION`, and packaging checks that field against the active SDK. The macOS 14 deployment target is separate from the linked SDK version.
 
@@ -23,6 +23,8 @@ OUTPUT_DIRECTORY="$PWD/dist/review-build" make build-package
 ```
 
 Packaging installs locked production dependencies using npm from the official Node distribution. It does not read personal `.npmrc` files or copy developer settings, authentication, or browser profiles. The first build may access the public Node, npm, and Playwright download services. Development type checks and tests still require `make deps`.
+
+`make build-package` always uses Release configuration, while retaining ad-hoc signing and disabled online updates by default. See the release workflow below for signing, update metadata, and archives. Direct script calls accept `CONFIGURATION=debug` or `release`, defaulting to `release`.
 
 ## Node and architecture
 
@@ -55,15 +57,17 @@ Complete apps prefer their bundled Node and browser and ignore development runti
 | Command | Behavior |
 | --- | --- |
 | `make build` | Debug Swift executable in `macos/AnotherYou/.build`; no `.app`. |
-| `make run` | Build a fresh app and start the workspace-managed instance at `dist/dev/Another You.app`. |
+| `make run` | Build a Debug app and start the workspace-managed instance at `dist/dev/Another You.app`. |
 | `make update` | Same local rebuild/restart as `make run`; no Git fetch or pull. |
 | `make stop` | Stop the managed development instance and its sidecar. |
-| `make build-package` | Produce a separate package; it does not launch it. |
+| `make build-package` | Package a separate Release `.app` without launching it. |
 | `make clean` | Stop the managed instance and remove known build/test outputs. |
 
-`run` and `update` use a fixed development directory, regardless of `OUTPUT_DIRECTORY`. The new app is built before the previous managed instance is stopped. [dev-service.sh](../scripts/dev-service.sh) records the PID, process start time, and executable command so an obsolete record does not authorize stopping a different process. Its log is `dist/dev/another-you.log`.
+`run` and `update` always use Debug configuration with online updates disabled and a fixed development directory, regardless of `OUTPUT_DIRECTORY` or `CONFIGURATION`. The new app is built before the previous managed instance is stopped. [dev-service.sh](../scripts/dev-service.sh) records the PID, process start time, and executable command so an obsolete record does not authorize stopping a different process. Its log is `dist/dev/another-you.log`.
 
-`make clean` removes the managed app/log, the default `dist/macos/Another You.app`, Swift `.build`, Agent coverage, and development staging files. It keeps `agent-core/node_modules`, `agent-core/.cache/pi`, personal app data, and packages in custom output directories. Remove your own temporary or custom outputs separately after reviewing them.
+The Debug app is displayed as **Another You Debug** in macOS, uses bundle identifier `com.anotheryou.mac.debug`, and defaults to `~/Library/Application Support/AnotherYouDebug/`. Release retains `com.anotheryou.mac` and `AnotherYou/`. `ANOTHER_YOU_DATA_DIR` still takes precedence. Both configurations record `AnotherYouBuildConfiguration` in `Info.plist`; the bundle filename remains `Another You.app`. Debug also produces `Another You.app.dSYM` to retain line-level debug information after its temporary scratch directory is removed. `update` replaces the app and symbols together, and `clean` removes both.
+
+`make clean` removes the managed app/log, the default `dist/macos/Another You.app` and its `.dSYM`, Swift `.build`, Agent coverage, and development staging files. It keeps `agent-core/node_modules`, `agent-core/.cache/pi`, personal app data, and packages in custom output directories. Remove your own temporary or custom outputs separately after reviewing them.
 
 ## Verification
 

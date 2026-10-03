@@ -171,20 +171,28 @@ public struct DesktopSettingsView: View {
 
     public var body: some View {
         Section(AppLocalization.text("截图与电脑操作")) {
-            permissionRow(AppLocalization.text("屏幕录制"), key: "screenRecordingGranted", permission: "screenRecording")
-            permissionRow(AppLocalization.text("辅助功能"), key: "accessibilityGranted", permission: "accessibility")
+            DesktopPermissionRow(session: session, permission: "screenRecording", title: "屏幕录制")
+            DesktopPermissionRow(session: session, permission: "accessibility", title: "辅助功能")
             Text(AppLocalization.text("截图会附带应用上下文，预览后随消息发送。浏览器使用独立后台会话；电脑后台操作取决于应用支持。"))
                 .font(.caption).foregroundStyle(.secondary)
             if let error = session.error { Text(AppLocalization.text(error)).font(.caption).foregroundStyle(.red) }
-        }.onAppear { session.refreshPermissions() }
+        }
     }
+}
 
-    private func permissionRow(_ title: String, key: String, permission: String) -> some View {
+struct DesktopPermissionRow: View {
+    @ObservedObject var session: DesktopSession
+    let permission: String
+    let title: String
+
+    var body: some View {
         HStack {
             Text(AppLocalization.text(title))
             Spacer()
-            if session.permissions[key]?.bool == true { Label(AppLocalization.text("已允许"), systemImage: "checkmark.circle").foregroundStyle(.secondary) }
+            if session.permissions[permission + "Granted"]?.bool == true { Label(AppLocalization.text("已允许"), systemImage: "checkmark.circle").foregroundStyle(.secondary) }
             else { Button(AppLocalization.text("授权")) { Task { await session.requestPermission(permission) } } }
         }
+        .onAppear { session.refreshPermissions() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in session.refreshPermissions() }
     }
 }
