@@ -47,6 +47,110 @@ struct ModelConfigurationTests {
         #expect(sent.count == 1)
     }
 
+    @Test func apiConfigurationCatalogDecodesWithoutExposingCredentials() throws {
+        let data = Data(#"{"models":[],"providers":[{"id":"openai","name":"OpenAI","configured":false,"authMethods":[{"type":"api_key","name":"API key"}],"apiConfiguration":{"baseUrl":"https://api.openai.com/v1","api":"openai-responses"}}]}"#.utf8)
+        let catalog = try JSONDecoder().decode(PiModelCatalog.self, from: data)
+        #expect(catalog.providers[0].apiConfiguration?.baseUrl == "https://api.openai.com/v1")
+        #expect(catalog.providers[0].apiConfiguration?.api == "openai-responses")
+        let legacy = Data(#"{"id":"fixture","name":"Fixture","configured":false,"authMethods":[]}"#.utf8)
+        #expect(try JSONDecoder().decode(PiProviderOption.self, from: legacy).apiConfiguration == nil)
+    }
+
+    @Test func apiFormKeepsDraftAndSendsCompleteConfigurationUntilMatchingReceipt() {
+        let session = session()
+        var sent: [[String: JSONValue]] = []
+        session.sendCommand = { sent.append($0); return true }
+        session.prepareAPIConfiguration(provider: nil)
+        session.apiConfigurationDraft.baseUrl = " https://api.example.com/v1 "
+        session.apiConfigurationDraft.model = " gateway-model "
+        session.apiConfigurationDraft.apiKey = " fixture-api-key "
+        session.prepareAPIConfiguration(provider: nil)
+        #expect(session.apiConfigurationDraft.apiKey == " fixture-api-key ")
+        session.configureAPI(thinkingLevel: "off")
+        #expect(sent[0]["op"] == .string("modelConfigure"))
+        #expect(sent[0]["provider"] == .string("custom"))
+        #expect(sent[0]["baseUrl"] == .string("https://api.example.com/v1"))
+        #expect(sent[0]["api"] == .string("openai-completions"))
+        #expect(sent[0]["model"] == .string("gateway-model"))
+        #expect(sent[0]["apiKey"] == .string("fixture-api-key"))
+        #expect(session.isBusy && session.catalog.selected == nil)
+        session.configureAPI(thinkingLevel: "off")
+        #expect(sent.count == 1)
+        _ = session.consume(event("model.operation", ["requestId": .string("stale"), "operation": .string("modelConfigure"), "state": .string("succeeded")]))
+        #expect(!session.apiConfigurationDraft.apiKey.isEmpty)
+        _ = session.consume(event("model.operation", ["requestId": sent[0]["requestId"]!, "operation": .string("modelConfigure"), "state": .string("succeeded")]))
+        #expect(!session.isBusy && session.apiConfigurationDraft.apiKey.isEmpty)
+        #expect(session.apiConfigurationDraft.model == " gateway-model ")
+    }
+
+    @Test func reopeningCustomFormPreservesProviderAndDraftWithAnotherSavedModel() {
+        let session = session()
+        let snapshot: [String: JSONValue] = ["models": .array([]), "providers": .array([.object([
+            "id": .string("openai"), "name": .string("OpenAI"), "configured": .bool(true),
+            "authMethods": .array([])])]), "selected": .object([
+                "provider": .string("openai"), "model": .string("saved"), "thinkingLevel": .string("off")])]
+        _ = session.consume(event("model.catalog", snapshot))
+        session.synchronizeProvider()
+        #expect(session.accountProviderID == "openai")
+        session.accountProviderID = ModelConfigurationSession.customProviderID
+        session.prepareAPIConfiguration(provider: nil)
+        session.apiConfigurationDraft.baseUrl = "https://api.example.com/v1"
+        session.apiConfigurationDraft.model = "draft-model"
+        session.apiConfigurationDraft.apiKey = "draft-key"
+        let draft = session.apiConfigurationDraft
+        _ = session.consume(event("model.catalog", snapshot))
+        session.synchronizeProvider()
+        session.prepareAPIConfiguration(provider: nil)
+        #expect(session.accountProviderID == ModelConfigurationSession.customProviderID)
+        #expect(session.apiConfigurationDraft == draft)
+        session.synchronizeProvider(preferSavedSelection: true)
+        #expect(session.accountProviderID == "openai")
+    }
+
+    @Test func apiFormRequiresCompleteFieldsAndOnlyRetainsSavedAPIKeyAccounts() {
+        let session = session()
+        var sent: [[String: JSONValue]] = []
+        session.sendCommand = { sent.append($0); return true }
+        session.apiConfigurationDraft = PiAPIConfigurationDraft(provider: "fixture", baseUrl: "https://api.example.com/v1", model: "test")
+        session.configureAPI(thinkingLevel: "off")
+        #expect(sent.isEmpty)
+        func account(_ credential: String) -> AgentEvent {
+            event("model.catalog", ["models": .array([]), "providers": .array([.object([
+                "id": .string("fixture"), "name": .string("Fixture"), "configured": .bool(true),
+                "credentialType": .string(credential), "authMethods": .array([]),
+                "apiConfiguration": .object(["baseUrl": .string("https://api.example.com/v1"), "api": .string("openai-completions")])])])])
+        }
+        _ = session.consume(account("oauth"))
+        #expect(!session.hasSavedAPIKey)
+        session.configureAPI(thinkingLevel: "off")
+        #expect(sent.isEmpty)
+        _ = session.consume(account("api_key"))
+        #expect(session.hasSavedAPIKey)
+        session.apiConfigurationDraft.baseUrl = "file:///tmp/fixture"
+        session.configureAPI(thinkingLevel: "off")
+        #expect(sent.isEmpty)
+        session.apiConfigurationDraft.baseUrl = "https://user:password@api.example.com/v1"
+        session.configureAPI(thinkingLevel: "off")
+        #expect(sent.isEmpty)
+        session.apiConfigurationDraft.baseUrl = "https://api.example.com/v1"
+        session.configureAPI(thinkingLevel: "off")
+        #expect(sent.count == 1 && sent[0]["apiKey"] == nil)
+    }
+
+    @Test func failedAPISaveAllowsRetryAndDisconnectionClearsTheKey() {
+        let session = session()
+        var sent: [[String: JSONValue]] = []
+        session.sendCommand = { sent.append($0); return true }
+        session.apiConfigurationDraft = PiAPIConfigurationDraft(provider: "fixture", baseUrl: "https://api.example.com/v1", model: "test", apiKey: "retry-key")
+        session.configureAPI(thinkingLevel: "off")
+        _ = session.consume(event("model.operation", ["requestId": sent[0]["requestId"]!, "operation": .string("modelConfigure"), "state": .string("failed"), "message": .string("保存失败")]))
+        #expect(session.apiConfigurationDraft.apiKey == "retry-key" && session.canChange)
+        session.configureAPI(thinkingLevel: "off")
+        #expect(sent.count == 2)
+        session.updateConnection(connected: false, busy: false)
+        #expect(session.apiConfigurationDraft.apiKey.isEmpty && !session.isBusy)
+    }
+
     @Test func catalogFailureAndRefreshReceiptsReleaseLoadingState() {
         let session = session()
         var sent: [[String: JSONValue]] = []
@@ -74,13 +178,160 @@ struct ModelConfigurationTests {
         #expect(session.answer("fixture-key"))
         #expect(sent.last?["promptId"] == .string("prompt-1"))
         #expect(session.authentication?.prompt?.id == "prompt-1")
+        #expect(session.isSubmittingAuthentication)
+        #expect(!session.answer("duplicate-key"))
+        #expect(sent.count == 2)
         _ = session.consume(event("model.auth", ["requestId": requestID, "provider": .string("fixture"), "stage": .string("promptResolved"), "promptId": .string("old")]))
         #expect(session.authentication?.prompt != nil)
+        #expect(session.isSubmittingAuthentication)
         _ = session.consume(event("model.auth", ["requestId": requestID, "provider": .string("fixture"), "stage": .string("promptResolved"), "promptId": .string("prompt-1")]))
         #expect(session.authentication?.prompt == nil)
+        #expect(!session.isSubmittingAuthentication)
         _ = session.consume(event("model.operation", ["requestId": requestID, "operation": .string("modelLogin"), "state": .string("succeeded")]))
         #expect(session.authentication == nil)
         #expect(!session.isBusy)
+    }
+
+    @Test func copilotDomainCanBeEmptyAndCancellationAllowsAnotherProvider() {
+        let session = session()
+        var sent: [[String: JSONValue]] = []
+        session.sendCommand = { sent.append($0); return true }
+        session.login(provider: "github-copilot", type: "oauth")
+        let requestID = sent[0]["requestId"]!
+        _ = session.consume(event("model.auth", ["requestId": requestID, "provider": .string("github-copilot"), "stage": .string("prompt"),
+            "prompt": .object(["id": .string("domain"), "type": .string("text"), "message": .string("GitHub Enterprise URL/domain (blank for github.com)")])]))
+        #expect(session.canAnswerAuthentication(""))
+        #expect(session.answer(""))
+        #expect(sent.last?["value"] == .string(""))
+        #expect(!session.canAnswerAuthentication(""))
+        _ = session.consume(event("model.auth", ["requestId": requestID, "provider": .string("github-copilot"), "stage": .string("promptResolved"), "promptId": .string("domain")]))
+        _ = session.consume(event("model.auth", ["requestId": requestID, "provider": .string("github-copilot"), "stage": .string("notify"),
+            "notice": .object(["type": .string("device_code"), "userCode": .string("ABCD-EFGH"), "verificationUri": .string("https://github.com/login/device")])]))
+        #expect(session.authentication?.notices.last?.userCode == "ABCD-EFGH")
+        #expect(!session.canAnswerAuthentication(""))
+        session.cancel()
+        _ = session.consume(event("model.operation", ["requestId": requestID, "operation": .string("modelLogin"), "state": .string("cancelled")]))
+        #expect(session.canChange)
+        session.login(provider: "other", type: "api_key")
+        #expect(session.authentication?.provider == "other")
+        #expect(session.authentication?.prompt == nil)
+        #expect(session.authentication?.notices.isEmpty == true)
+    }
+
+    @Test(arguments: ["text", "secret", "manual_code", "select"])
+    func authenticationValidatesInputBeforeSending(type: String) {
+        let session = session()
+        var sent: [[String: JSONValue]] = []
+        session.sendCommand = { sent.append($0); return true }
+        session.login(provider: "fixture", type: "oauth")
+        _ = session.consume(event("model.auth", ["requestId": sent[0]["requestId"]!, "provider": .string("fixture"), "stage": .string("prompt"),
+            "prompt": .object(["id": .string("input"), "type": .string(type), "message": .string("Input"),
+                               "options": .array([.object(["id": .string("valid"), "label": .string("Valid")])])])]))
+        #expect(!session.answer(String(repeating: "a", count: 8193)))
+        #expect(!session.answer(String(repeating: "😀", count: 4097)))
+        #expect(session.canAnswerAuthentication("") == (type == "text"))
+        #expect(session.canAnswerAuthentication(" \n\t") == (type == "text"))
+        if type == "select" { #expect(!session.answer("invalid-option")) }
+        if type != "text" { #expect(!session.answer(" \n\t")) }
+        #expect(sent.count == 1)
+        #expect(session.answer("valid"))
+        #expect(sent.last?["value"] == .string("valid"))
+    }
+
+    @Test func rejectedAuthenticationInputCanBeRetriedWithoutRestartingLogin() {
+        let session = session()
+        var sent: [[String: JSONValue]] = []
+        session.sendCommand = { sent.append($0); return true }
+        session.login(provider: "fixture", type: "api_key")
+        let requestID = sent[0]["requestId"]!
+        _ = session.consume(event("model.auth", ["requestId": requestID, "provider": .string("fixture"), "stage": .string("prompt"),
+            "prompt": .object(["id": .string("key"), "type": .string("secret"), "message": .string("Key")])]))
+        #expect(session.answer("$ENV_KEY"))
+        _ = session.consume(event("model.operation", ["requestId": requestID, "operation": .string("modelAuthReply"), "state": .string("failed"), "message": .string("请输入凭据本身，不能使用环境变量或命令")]))
+        #expect(!session.isSubmittingAuthentication)
+        #expect(session.authentication?.prompt?.id == "key")
+        #expect(session.authenticationInput == "$ENV_KEY")
+        #expect(session.answer("actual-key"))
+        #expect(session.message == nil)
+        #expect(sent.last?["requestId"] == requestID)
+        #expect(sent.last?["promptId"] == .string("key"))
+        session.updateConnection(connected: false, busy: false)
+        #expect(!session.isSubmittingAuthentication)
+        #expect(!session.canAnswerAuthentication("actual-key"))
+        #expect(session.authenticationInput.isEmpty)
+    }
+
+    @Test func requiredAccountFieldsAndPromptTransitionsPreserveOnlyCurrentInput() {
+        let session = session()
+        var sent: [[String: JSONValue]] = []
+        session.sendCommand = { sent.append($0); return true }
+        session.login(provider: "google-vertex", type: "api_key")
+        let requestID = sent[0]["requestId"]!
+        _ = session.consume(event("model.auth", ["requestId": requestID, "provider": .string("google-vertex"), "stage": .string("prompt"),
+            "prompt": .object(["id": .string("method"), "type": .string("select"), "message": .string("Choose"), "required": .bool(true),
+                "options": .array([.object(["id": .string("api-key"), "label": .string("API key")]),
+                                    .object(["id": .string("service-account"), "label": .string("Service account")])])])]))
+        #expect(session.authenticationInput == "api-key")
+        session.authenticationInput = "service-account"
+        session.loadCatalog()
+        #expect(session.authenticationInput == "service-account")
+        #expect(session.answer(session.authenticationInput))
+        _ = session.consume(event("model.auth", ["requestId": requestID, "provider": .string("google-vertex"), "stage": .string("prompt"),
+            "prompt": .object(["id": .string("project"), "type": .string("text"), "message": .string("Enter Google Cloud project ID"), "required": .bool(true)])]))
+        #expect(session.authenticationInput.isEmpty)
+        #expect(!session.answer(""))
+        #expect(!session.answer(" \n"))
+        #expect(session.answer("my-project"))
+        _ = session.consume(event("model.operation", ["requestId": requestID, "operation": .string("modelLogin"), "state": .string("failed")]))
+        #expect(session.authenticationInput.isEmpty)
+        #expect(session.authentication == nil)
+        #expect(session.canChange)
+    }
+
+    @Test func browserAuthorizationOpensOncePerLoginAndIgnoresStaleOrNonWebLinks() {
+        let session = session()
+        var sent: [[String: JSONValue]] = []
+        var opened: [URL] = []
+        session.sendCommand = { sent.append($0); return true }
+        session.openAuthenticationURL = { opened.append($0); return true }
+        session.login(provider: "openai", type: "oauth")
+        let requestID = sent[0]["requestId"]!
+        func notice(_ id: JSONValue, _ url: String) -> AgentEvent {
+            event("model.auth", ["requestId": id, "provider": .string("openai"), "stage": .string("notify"),
+                "notice": .object(["type": .string("auth_url"), "url": .string(url)])])
+        }
+        let url = "https://example.invalid/authorize?state=fixture"
+        _ = session.consume(notice(.string("stale-request"), url))
+        _ = session.consume(notice(requestID, "file:///tmp/invalid"))
+        #expect(opened.isEmpty)
+        _ = session.consume(notice(requestID, url))
+        _ = session.consume(notice(requestID, url))
+        #expect(opened.map(\.absoluteString) == [url])
+        #expect(session.authentication?.notices.count == 2)
+        _ = session.consume(event("model.auth", ["requestId": requestID, "provider": .string("openai"), "stage": .string("notify"),
+            "notice": .object(["type": .string("device_code"), "userCode": .string("ABCD-EFGH"), "verificationUri": .string("https://example.invalid/device")])]))
+        #expect(opened.count == 1)
+        _ = session.consume(event("model.operation", ["requestId": requestID, "operation": .string("modelLogin"), "state": .string("cancelled")]))
+        session.login(provider: "openai", type: "oauth")
+        _ = session.consume(notice(sent.last!["requestId"]!, url))
+        #expect(opened.count == 2)
+    }
+
+    @Test func browserFailureKeepsAuthorizationLinkAndManualInputAvailable() {
+        let session = session()
+        var command: [String: JSONValue] = [:]
+        session.sendCommand = { command = $0; return true }
+        session.openAuthenticationURL = { _ in false }
+        session.login(provider: "anthropic", type: "oauth")
+        let requestID = command["requestId"]!
+        _ = session.consume(event("model.auth", ["requestId": requestID, "provider": .string("anthropic"), "stage": .string("notify"),
+            "notice": .object(["type": .string("auth_url"), "url": .string("https://example.invalid/login")])]))
+        #expect(session.message == "无法打开浏览器，请点击登录链接重试")
+        #expect(session.authentication?.notices.first?.loginURL != nil)
+        _ = session.consume(event("model.auth", ["requestId": requestID, "provider": .string("anthropic"), "stage": .string("prompt"),
+            "prompt": .object(["id": .string("code"), "type": .string("manual_code"), "message": .string("Code")])]))
+        #expect(!session.canAnswerAuthentication(""))
+        #expect(session.canAnswerAuthentication("fixture-code"))
     }
 
     @Test func oauthCancellationAndDisconnectRemoveTransientAuthentication() {
@@ -133,6 +384,8 @@ struct ModelConfigurationTests {
         session.sendCommand = { _ in false }
         #expect(!session.answer("key"))
         #expect(session.authentication?.prompt != nil)
+        #expect(!session.isSubmittingAuthentication)
+        #expect(session.canAnswerAuthentication("key"))
         session.cancel()
         #expect(session.isBusy)
         #expect(session.message == "取消命令发送失败，请重试")
@@ -147,5 +400,44 @@ struct ModelConfigurationTests {
         #expect(session.isBusy)
         #expect(session.authentication != nil)
         #expect(session.message == "认证输入已失效")
+    }
+
+    @Test func initialProviderUsesSavedOrConfiguredAccountWithoutChoosingAnArbitraryCatalogEntry() {
+        var catalog = PiModelCatalog()
+        let unconfigured = PiProviderOption(id: "alphabetical-first", name: "First", configured: false, credentialType: nil, authMethods: [], configurationIssue: nil)
+        let configured = PiProviderOption(id: "configured", name: "Configured", configured: true, credentialType: "api_key", authMethods: [], configurationIssue: nil)
+        catalog.providers = [unconfigured]
+        #expect(catalog.preferredProviderID == nil)
+        catalog.providers.append(configured)
+        #expect(catalog.preferredProviderID == "configured")
+        catalog.selected = PiModelSelection(provider: "alphabetical-first", model: "saved", thinkingLevel: "off")
+        #expect(catalog.preferredProviderID == "alphabetical-first")
+        catalog.selected = PiModelSelection(provider: "removed", model: "missing", thinkingLevel: "off")
+        #expect(catalog.preferredProviderID == "configured")
+    }
+
+    @Test func connectionTestDistinguishesUnsavedUntestedFailureAndSuccess() {
+        let session = session()
+        var sent: [[String: JSONValue]] = []
+        session.sendCommand = { sent.append($0); return true }
+        session.testConnection()
+        #expect(sent.isEmpty)
+        #expect(!session.canTestConnection)
+        session.updateModelStatus(["configured": .bool(true), "available": .null])
+        #expect(session.connectionStatus == "尚未测试连接")
+        session.testConnection()
+        #expect(sent.last?["op"] == .string("modelTest"))
+        #expect(session.connectionStatus == "正在测试连接…")
+        #expect(!session.canTestConnection)
+        _ = session.consume(event("model.operation", ["requestId": sent.last!["requestId"]!, "operation": .string("modelTest"), "state": .string("failed")]))
+        session.updateModelStatus(["configured": .bool(true), "available": .bool(false)])
+        #expect(session.connectionStatus == "连接测试失败")
+        #expect(session.canTestConnection)
+        session.testConnection()
+        _ = session.consume(event("model.operation", ["requestId": sent.last!["requestId"]!, "operation": .string("modelTest"), "state": .string("succeeded")]))
+        session.updateModelStatus(["configured": .bool(true), "available": .bool(true)])
+        #expect(session.connectionStatus == "连接测试成功")
+        session.updateModelStatus(["configured": .bool(true), "available": .null])
+        #expect(session.connectionStatus == "尚未测试连接")
     }
 }

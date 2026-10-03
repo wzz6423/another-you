@@ -73,8 +73,15 @@ cat > "${workspace}/scripts/build-app.sh" <<'BUILD'
 set -euo pipefail
 fixture_dir="$(cd -- "$(dirname -- "$0")/../.." && pwd -P)"
 [[ ! -f "${fixture_dir}/fail-build" ]] || exit 42
-mkdir -p "${OUTPUT_DIRECTORY}/Another You.app/Contents/MacOS"
-cp "${fixture_dir}/fixture-app" "${OUTPUT_DIRECTORY}/Another You.app/Contents/MacOS/AnotherYou"
+printf '%s\n' "${CONFIGURATION:-}" "${ANOTHER_YOU_UPDATES_ENABLED:-}" "${OUTPUT_DIRECTORY:-}" > "${fixture_dir}/build-settings"
+output_dir="${OUTPUT_DIRECTORY:-$(dirname -- "$0")/../dist/macos}"
+[[ ! -e "${output_dir}/Another You.app" ]] || exit 43
+mkdir -p "${output_dir}/Another You.app/Contents/MacOS"
+cp "${fixture_dir}/fixture-app" "${output_dir}/Another You.app/Contents/MacOS/AnotherYou"
+if [[ "${CONFIGURATION:-}" == debug && "${ANOTHER_YOU_FIXTURE_NO_SYMBOLS:-0}" != 1 ]]; then
+  mkdir -p "${output_dir}/Another You.app.dSYM/Contents/Resources/DWARF"
+  printf 'debug symbols\n' > "${output_dir}/Another You.app.dSYM/Contents/Resources/DWARF/AnotherYou"
+fi
 BUILD
 chmod +x "${workspace}/scripts/build-app.sh"
 
@@ -134,20 +141,39 @@ run_dev stop || fail '未启动时 stop 应成功'
 [[ ! -e "$state_file" ]] || fail '未启动时不应写运行记录'
 pass '未启动时可重复停止'
 
-run_dev run || fail '带中文与空格工作区启动失败'
+CONFIGURATION=release ANOTHER_YOU_UPDATES_ENABLED=1 run_make run || fail '带中文与空格工作区启动失败'
+[[ "$(head -n 2 "${test_dir}/build-settings")" == $'debug\n0' ]] || fail 'make run 必须使用 Debug 且禁用在线更新'
 pid="$(head -n 1 "$state_file")"
 child="$(cat "${test_dir}/child")"
 is_running "$pid" && is_running "$child" || fail '未同时启动宿主和子进程'
 [[ "$(ps -p "$pid" -ww -o command=)" == "$app_binary" ]] || fail '启动路径未限定到当前工作区'
-pass '带中文与空格路径启动真实宿主与子进程'
+[[ -s "${workspace}/dist/dev/Another You.app.dSYM/Contents/Resources/DWARF/AnotherYou" ]] || fail '启动后未保留 Debug 符号'
+pass 'make run 固定使用 Debug、禁用在线更新，并在中文空格路径启动真实父子进程'
 
-run_make update || fail 'make update 失败'
+run_make update CONFIGURATION=release ANOTHER_YOU_UPDATES_ENABLED=1 "OUTPUT_DIRECTORY=${test_dir}/ignored" || fail 'make update 失败'
+[[ "$(head -n 2 "${test_dir}/build-settings")" == $'debug\n0' ]] || fail 'make update 不应继承 Release 或在线更新配置'
+[[ ! -e "${test_dir}/ignored" ]] || fail 'make update 不应使用自定义输出目录'
 new_pid="$(head -n 1 "$state_file")"
 new_child="$(cat "${test_dir}/child")"
 [[ "$new_pid" != "$pid" ]] && ! is_running "$pid" && ! is_running "$child" || fail '重启未清除旧实例'
 is_running "$new_pid" && is_running "$new_child" || fail '重启未保留新实例'
 [[ "$(cat "${test_dir}/events")" == $'child\nparent' ]] || fail '宿主未等待子进程先退出'
-pass 'update 替换实例并先回收旧子进程'
+[[ -s "${workspace}/dist/dev/Another You.app.dSYM/Contents/Resources/DWARF/AnotherYou" ]] || fail '重启后未保留 Debug 符号'
+pass 'update 替换实例与调试符号，并先回收旧子进程'
+
+if ANOTHER_YOU_FIXTURE_NO_SYMBOLS=1 run_make update; then fail '缺少 Debug 符号应拒绝更新'; fi
+[[ "$(head -n 1 "$state_file")" == "$new_pid" ]] && is_running "$new_pid" && is_running "$new_child" || fail '缺少符号时中断了原实例'
+pass '缺少 Debug 符号时拒绝更新并保留原运行实例'
+
+run_make build-package CONFIGURATION=debug || fail 'make build-package 失败'
+[[ "$(head -n 1 "${test_dir}/build-settings")" == release ]] || fail 'make build-package 必须使用 Release'
+[[ -x "${workspace}/dist/macos/Another You.app/Contents/MacOS/AnotherYou" ]] || fail '打包未生成独立应用'
+[[ "$(head -n 1 "$state_file")" == "$new_pid" ]] && is_running "$new_pid" && is_running "$new_child" || fail '独立打包中断了开发实例'
+pass 'build-package 固定使用 Release，独立打包且不重启开发实例'
+
+run_make build-package "OUTPUT_DIRECTORY=${test_dir}/custom output" || fail '自定义目录打包失败'
+[[ -x "${test_dir}/custom output/Another You.app/Contents/MacOS/AnotherYou" ]] || fail '打包未使用自定义输出目录'
+pass 'build-package 支持带空格的自定义输出目录'
 
 touch "${test_dir}/fail-build"
 if run_dev run; then fail '构建失败应返回非零'; fi
@@ -203,23 +229,27 @@ pass '并发生命周期命令被明确拒绝'
 
 mkdir -p "${test_dir}/external/Another You.app"
 touch "${test_dir}/external/Another You.app/keep"
+rm -rf "${workspace}/dist/macos/Another You.app"
+rmdir "${workspace}/dist/macos"
 ln -s "${test_dir}/external" "${workspace}/dist/macos"
 if run_make clean; then fail 'clean 不应遍历外部符号链接'; fi
 [[ -f "${test_dir}/external/Another You.app/keep" ]] || fail 'clean 删除了链接外部文件'
 rm "${workspace}/dist/macos"
 pass 'clean 拒绝外部目录符号链接'
 
-mkdir -p "${workspace}/dist/macos/Another You.app" "${workspace}/macos/AnotherYou/.build" \
-  "${workspace}/agent-core/coverage" "${workspace}/agent-core/.cache/pi" "${test_dir}/personal-data" \
+mkdir -p "${workspace}/dist/macos/Another You.app" "${workspace}/dist/macos/Another You.app.dSYM" "${workspace}/macos/AnotherYou/.build" \
+  "${workspace}/agent-core/coverage" "${workspace}/agent-core/.cache/pi" "${workspace}/agent-core/.cache/runtime" \
+  "${workspace}/agent-core/node_modules" "${test_dir}/personal-data" \
   "${workspace}/dist/dev/.build.interrupted"
-touch "${workspace}/dist/macos/keep" "${workspace}/agent-core/.cache/pi/keep" "${test_dir}/personal-data/config.json"
+touch "${workspace}/dist/macos/keep" "${workspace}/agent-core/.cache/pi/keep" "${workspace}/agent-core/.cache/runtime/keep" \
+  "${workspace}/agent-core/node_modules/keep" "${test_dir}/personal-data/config.json"
 run_dev run || fail 'clean 前启动失败'
 pid="$(head -n 1 "$state_file")"
 child="$(cat "${test_dir}/child")"
 run_make clean || fail 'make clean 失败'
 ! is_running "$pid" && ! is_running "$child" || fail 'clean 遗留了进程'
-[[ ! -e "${workspace}/dist/dev" && ! -e "${workspace}/dist/macos/Another You.app" && ! -e "${workspace}/macos/AnotherYou/.build" && ! -e "${workspace}/agent-core/coverage" ]] || fail 'clean 未清除全部已知产物'
-[[ -f "${workspace}/dist/macos/keep" && -f "${workspace}/agent-core/.cache/pi/keep" && -f "${test_dir}/personal-data/config.json" ]] || fail 'clean 删除了非构建数据'
-pass 'clean 停止进程、清产物并保留其他输出、Pi 缓存和个人数据'
+[[ ! -e "${workspace}/dist/dev" && ! -e "${workspace}/dist/macos/Another You.app" && ! -e "${workspace}/dist/macos/Another You.app.dSYM" && ! -e "${workspace}/macos/AnotherYou/.build" && ! -e "${workspace}/agent-core/coverage" ]] || fail 'clean 未清除全部已知产物'
+[[ -f "${workspace}/dist/macos/keep" && -f "${workspace}/agent-core/.cache/pi/keep" && -f "${workspace}/agent-core/.cache/runtime/keep" && -f "${workspace}/agent-core/node_modules/keep" && -f "${test_dir}/personal-data/config.json" && -x "${test_dir}/custom output/Another You.app/Contents/MacOS/AnotherYou" ]] || fail 'clean 删除了非构建数据'
+pass 'clean 停止进程、清产物并保留自定义输出、依赖、缓存和个人数据'
 
 printf '开发脚本测试：%s 通过，0 失败。\n' "$passed"

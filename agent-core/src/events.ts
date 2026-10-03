@@ -11,6 +11,7 @@ export type AgentEventKind =
   | "agent.request"
   | "agent.response"
   | "agent.usage"
+  | "activity.recorded"
   | "agent.activity"
   | "conversation.updated"
   | "conversation.messages"

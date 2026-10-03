@@ -7,10 +7,12 @@ import { StateStore, type PersistedState, type Proposal, type ProposalDecision, 
 import { ProactiveCoordinator, type ContextResult } from "./proactive.ts";
 
 import { retainedUsage, type UsageRecord } from "./usage.ts";
+import { activityFromEvent, retainedActivity, type ActivityRecord } from "./activity.ts";
 import { parseAttachments } from "./desktop-bridge.ts";
 import { retainedHistory } from "./activity-history.ts";
 
 export * from "./usage.ts";
+export * from "./activity.ts";
 export * from "./config.ts";
 export * from "./events.ts";
 export * from "./pi-adapter.ts";
@@ -73,6 +75,7 @@ export class AgentCore {
   private readonly proposals = new Map<string, Proposal>();
   private history: AgentEvent[] = [];
   private usageRecords: UsageRecord[] = [];
+  private activityRecords: ActivityRecord[] = [];
   private readonly conversations = new Map<string, ConversationSession>();
   private paused = false;
   private timer: ReturnType<typeof setInterval> | undefined;
@@ -88,6 +91,10 @@ export class AgentCore {
     this.paused = saved?.paused ?? false;
     this.history = retainedHistory(saved?.history ?? [], this.clock());
     this.usageRecords = retainedUsage(saved?.usageRecords ?? [], this.clock());
+    this.activityRecords = retainedActivity(saved?.activityRecords ?? (saved?.history ?? []).flatMap(event => {
+      const record = activityFromEvent(event);
+      return record ? [record] : [];
+    }), this.clock());
     for (const session of saved?.conversations ?? []) this.conversations.set(session.id, session);
     for (const proposal of saved?.proposals ?? []) this.proposals.set(proposal.id, proposal);
     this.events = new EventBus();
@@ -184,6 +191,7 @@ export class AgentCore {
       conversations: this.conversationSnapshots(includeConversationMessages),
       history: structuredClone(retainedHistory(this.history, this.clock())),
       usageRecords: structuredClone(retainedUsage(this.usageRecords, this.clock())),
+      activityRecords: structuredClone(retainedActivity(this.activityRecords, this.clock())),
     };
   }
 
@@ -213,7 +221,8 @@ export class AgentCore {
     session.state = "running";
     session.updatedAt = this.clock().toISOString();
     this.publishConversation(session.id);
-    this.events.emit({ kind: "agent.request", source: "agent", payload: { requestId, conversationId, prompt, ...(images.length ? { screenshotCount: images.length } : {}) } });
+    this.events.emit({ kind: "agent.request", source: "agent", occurredAt: this.clock(), payload: { requestId, conversationId, prompt,
+      ...(appName || session.appName ? { appName: appName || session.appName } : {}), ...(images.length ? { screenshotCount: images.length } : {}) } });
     try {
       const response = await this.runWithUsage({ prompt, attachments: images, allowForeground, context: { conversation: context } }, "prompt", { requestId, conversationId });
       turn.response = response.text;
@@ -362,6 +371,13 @@ export class AgentCore {
 
   private record(event: AgentEvent): void {
     if (event.kind === "agent.status" || event.kind === "scheduler.status") return;
+    if (event.kind === "activity.recorded") {
+      this.activityRecords = retainedActivity([...this.activityRecords, {
+        id: event.id, occurredAt: event.occurredAt, ...event.payload,
+      } as unknown as ActivityRecord], this.clock());
+      this.persist();
+      return;
+    }
     if (event.kind === "conversation.updated" || event.kind === "conversation.messages") return;
     if (event.kind === "context.request") {
       this.events.emit({ kind: "agent.activity", source: "agent", payload: { category: "context", phase: "started", source: "context" } });
@@ -390,6 +406,11 @@ export class AgentCore {
       return;
     }
     this.history.push(structuredClone(event));
+    const activity = activityFromEvent(event);
+    if (activity && !this.activityRecords.some(record => record.id === activity.id)) {
+      const { id, occurredAt, ...payload } = activity;
+      this.events.emit({ id, occurredAt, kind: "activity.recorded", source: "agent", payload });
+    }
     const finished = [...this.proposals.values()].filter((proposal) => ["completed", "ignored"].includes(proposal.state));
     for (const proposal of finished.slice(0, Math.max(0, finished.length - 100))) this.proposals.delete(proposal.id);
     this.persist();
@@ -397,6 +418,6 @@ export class AgentCore {
 
   private persist(): void {
     this.history = retainedHistory(this.history, this.clock());
-    this.store.save({ version: 1, paused: this.paused, proposals: [...this.proposals.values()], conversations: [...this.conversations.values()], history: this.history, usageRecords: retainedUsage(this.usageRecords, this.clock()), scheduler: this.scheduler.snapshot(), rules: this.scheduler.listRules(), proactive: this.proactive.snapshot() }, this.config.dataDir);
+    this.store.save({ version: 1, paused: this.paused, proposals: [...this.proposals.values()], conversations: [...this.conversations.values()], history: this.history, usageRecords: retainedUsage(this.usageRecords, this.clock()), activityRecords: retainedActivity(this.activityRecords, this.clock()), scheduler: this.scheduler.snapshot(), rules: this.scheduler.listRules(), proactive: this.proactive.snapshot() }, this.config.dataDir);
   }
 }

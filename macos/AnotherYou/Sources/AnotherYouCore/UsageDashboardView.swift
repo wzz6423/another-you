@@ -26,14 +26,22 @@ public struct UsageDashboardView: View {
 
     private func dashboard(_ summary: UsageSummary, now: Date) -> some View {
         VStack(alignment: .leading, spacing: 20) {
-            HStack {
-                Text(AppLocalization.text("用量概览")).font(.title3.bold())
-                Spacer()
-                Picker(AppLocalization.text("时间范围"), selection: $period) {
-                    ForEach(UsagePeriod.allCases) { Text($0.title(locale: interfaceLocale)).tag($0) }
-                }.pickerStyle(.segmented).frame(maxWidth: 260)
-                UsageExportButton(summary: summary, period: period, now: now)
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 16) {
+                    Text(AppLocalization.text("用量概览")).font(.title3.bold()).fixedSize()
+                    Spacer(minLength: 0)
+                    headerActions(summary, now: now)
+                }
+                VStack(alignment: .leading, spacing: 12) {
+                    Text(AppLocalization.text("用量概览")).font(.title3.bold())
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: 16) { headerActions(summary, now: now) }
+                        VStack(alignment: .leading, spacing: 12) { headerActions(summary, now: now) }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             if summary.records.isEmpty {
                 HStack(spacing: 20) {
                     Image(systemName: "chart.pie").font(.system(size: 48)).foregroundStyle(.tertiary)
@@ -75,8 +83,18 @@ public struct UsageDashboardView: View {
                 breakdown(AppLocalization.text("工具 / Plugin / Skill / MCP"), rows: summary.tools, empty: AppLocalization.text("这段时间没有已记录的调用"), unit: AppLocalization.text("次"))
             }
         }
-        .padding(24)
+        .padding(.vertical, 24)
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 20))
+    }
+
+    @ViewBuilder
+    private func headerActions(_ summary: UsageSummary, now: Date) -> some View {
+        Picker(AppLocalization.text("时间范围"), selection: $period) {
+            ForEach(UsagePeriod.allCases) { Text($0.title(locale: interfaceLocale)).tag($0) }
+        }
+        .pickerStyle(.segmented)
+        .fixedSize()
+        UsageExportButton(summary: summary, period: period, now: now).fixedSize()
     }
 
     @ViewBuilder

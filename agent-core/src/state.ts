@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { UsageRecord } from "./usage.ts";
+import type { ActivityRecord } from "./activity.ts";
 import type { PrivacyPolicy } from "./config.ts";
 import type { AgentEvent } from "./events.ts";
 import type { SchedulerState, TriggerRule } from "./scheduler.ts";
@@ -45,6 +46,7 @@ export interface PersistedState {
   conversations?: ConversationSession[];
   history: AgentEvent[];
   usageRecords?: UsageRecord[];
+  activityRecords?: ActivityRecord[];
   scheduler: SchedulerState;
   rules?: TriggerRule[];
   proactive?: ProactiveState;
@@ -107,6 +109,7 @@ export class StateStore {
     const copy = structuredClone(state);
     if (!this.privacy.storePrompts) {
       for (const rule of copy.rules ?? []) delete rule.context;
+      for (const record of copy.activityRecords ?? []) delete record.appName;
     }
     for (const proposal of copy.proposals) {
       if (!this.privacy.storeResponses || (!this.privacy.storePrompts && proposal.state === "failed")) delete proposal.text;
@@ -136,6 +139,7 @@ export class StateStore {
         delete event.payload.context;
       }
       if (!this.privacy.storePrompts) {
+        delete event.payload.appName;
         delete event.payload.prompt;
         delete event.payload.context;
         delete event.payload.signal;

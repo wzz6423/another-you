@@ -133,28 +133,28 @@ struct ConversationComposer: View {
     var body: some View {
         VStack(alignment: .trailing, spacing: 10) {
             CaptureAttachmentsView(session: desktop)
-            HStack {
-                Toggle(AppLocalization.text("允许前台控制"), isOn: $desktop.allowForeground)
-                    .toggleStyle(.checkbox).font(.caption)
-                    .help(AppLocalization.text("开启后，电脑操作可能移动鼠标、输入文字或切换应用。默认使用后台操作。"))
-                    .disabled(store.hasPendingPrompt)
-                Spacer()
-                if store.hasPendingPrompt {
-                    Button(AppLocalization.text("停止"), systemImage: "stop.fill") { store.stopCurrentTask() }
-                        .appShortcut(.stop)
-                }
-            }
             if let activity = desktop.activity { Text(activity).font(.caption).foregroundStyle(.secondary) }
             TextField(AppLocalization.text("写下想梳理的一件事…"), text: Binding(get: { prompt }, set: { store.setInputDraft($0, for: .conversation) }), axis: .vertical)
                 .lineLimit(3...8).textFieldStyle(.plain).font(.system(size: 13))
                 .focused($inputFocused)
                 .disabled(updates.isInstalling)
-            Button(store.hasPendingPrompt ? AppLocalization.text("正在生成") : AppLocalization.text("发送"), systemImage: "arrow.up") {
-                if store.ask(prompt) { store.setInputDraft("", for: .conversation); inputFocused = true }
+            HStack(spacing: 12) {
+                if store.hasPendingPrompt {
+                    Button(AppLocalization.text("停止"), systemImage: "stop.fill") { store.stopCurrentTask() }
+                        .appShortcut(.stop)
+                }
+                Spacer()
+                Toggle(AppLocalization.text("允许前台控制"), isOn: $desktop.allowForeground)
+                    .toggleStyle(.checkbox).font(.caption)
+                    .help(AppLocalization.text("开启后，电脑操作可能移动鼠标、输入文字或切换应用。默认使用后台操作。"))
+                    .disabled(store.hasPendingPrompt)
+                Button(store.hasPendingPrompt ? AppLocalization.text("正在生成") : AppLocalization.text("发送"), systemImage: "arrow.up") {
+                    if store.ask(prompt) { store.setInputDraft("", for: .conversation); inputFocused = true }
+                }
+                .buttonStyle(.borderedProminent).tint(.blue).controlSize(.small)
+                .appShortcut(.sendMessage)
+                .disabled((prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && desktop.attachments.isEmpty) || !store.isConnected || !store.modelConfigured || store.hasPendingPrompt || store.isLoadingConversation || updates.isInstalling || !store.pendingConversationActions.isEmpty || (store.selectedConversationID != nil && store.conversationActionError != nil))
             }
-            .buttonStyle(.borderedProminent).tint(.blue).controlSize(.small)
-            .appShortcut(.sendMessage)
-            .disabled((prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && desktop.attachments.isEmpty) || !store.isConnected || !store.modelConfigured || store.hasPendingPrompt || store.isLoadingConversation || updates.isInstalling || !store.pendingConversationActions.isEmpty || (store.selectedConversationID != nil && store.conversationActionError != nil))
         }
         .padding(16).background(.background, in: RoundedRectangle(cornerRadius: 16))
         .onAppear { inputFocused = true }

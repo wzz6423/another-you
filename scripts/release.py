@@ -116,11 +116,18 @@ def resolved_config(config, version, arch):
 
 
 def build_settings():
+    configuration = os.environ.get("CONFIGURATION", "release")
+    require(configuration in ("debug", "release"), "CONFIGURATION 必须为 debug 或 release")
     version, build = os.environ.get("APP_VERSION", "0.1.0"), os.environ.get("APP_BUILD", "1")
     version_build(version, build)
     enabled = os.environ.get("ANOTHER_YOU_UPDATES_ENABLED", "0")
     require(enabled in ("0", "1"), "ANOTHER_YOU_UPDATES_ENABLED 必须为 0 或 1")
+    require(configuration != "debug" or enabled == "0", "Debug 应用不能启用在线更新")
     settings = {"CFBundleIdentifier": "com.anotheryou.mac", "CFBundleName": "Another You", "CFBundleDisplayName": "Another You", "CFBundleExecutable": "AnotherYou", "CFBundlePackageType": "APPL", "CFBundleShortVersionString": version, "CFBundleVersion": build, "LSMinimumSystemVersion": "14.0", "NSHighResolutionCapable": True, "AnotherYouUpdatesEnabled": enabled == "1", "SURequireSignedFeed": True, "SUVerifyUpdateBeforeExtraction": True, "SUEnableAutomaticChecks": False, "SUAutomaticallyUpdate": False}
+    settings["AnotherYouBuildConfiguration"] = configuration
+    settings["CFBundleIconFile"] = "AppIcon.icns"
+    if configuration == "debug":
+        settings.update(CFBundleIdentifier="com.anotheryou.mac.debug", CFBundleName="Another You Debug", CFBundleDisplayName="Another You Debug")
     if enabled == "1":
         settings["SUFeedURL"] = https_url(os.environ.get("SU_FEED_URL"))
         key = os.environ.get("SPARKLE_PUBLIC_ED_KEY")
@@ -344,7 +351,7 @@ def package(args, config):
     with tempfile.TemporaryDirectory(prefix=".another-you-release-", dir=output.parent) as temporary:
         stage = Path(temporary)
         bundle_dir = stage / "bundle"
-        env = dict(os.environ, APP_VERSION=args.version, APP_BUILD=args.build, BUILD_ARCH=args.arch, OUTPUT_DIRECTORY=str(bundle_dir), BUNDLE_NODE="1", ANOTHER_YOU_UPDATES_ENABLED="1", SU_FEED_URL=resolved["feedURLTemplate"], ANOTHER_YOU_FALLBACK_FEED_URL=resolved["fallbackFeedURLTemplate"], SPARKLE_PUBLIC_ED_KEY=resolved["publicEDKey"])
+        env = dict(os.environ, CONFIGURATION="release", APP_VERSION=args.version, APP_BUILD=args.build, BUILD_ARCH=args.arch, OUTPUT_DIRECTORY=str(bundle_dir), BUNDLE_NODE="1", ANOTHER_YOU_UPDATES_ENABLED="1", SU_FEED_URL=resolved["feedURLTemplate"], ANOTHER_YOU_FALLBACK_FEED_URL=resolved["fallbackFeedURLTemplate"], SPARKLE_PUBLIC_ED_KEY=resolved["publicEDKey"])
         print(f"构建 {args.version} ({args.build}) / {args.arch}…", flush=True)
         subprocess.run([str(ROOT / "scripts/build-app.sh")], env=env, check=True)
         app = bundle_dir / "Another You.app"

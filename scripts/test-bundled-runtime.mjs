@@ -70,10 +70,23 @@ async function worker(app, directory, homeState) {
   const { BrowserSession, findBrowserExecutable } = await import(pathToFileURL(join(root, 'src/browser-use.ts')).href);
   const { createAgentTools } = await import(pathToFileURL(join(root, 'src/tools.ts')).href);
   const { createDefaultConfig } = await import(pathToFileURL(join(root, 'src/config.ts')).href);
+  const sourcePaths = homeState === 'synthetic-private-config'
+    ? ['settings.json', 'models.json', 'auth.json'].map(name => join(process.env.PI_CODING_AGENT_DIR, name)) : [];
+  const sourceBefore = await Promise.all(sourcePaths.map(path => readFile(path, 'utf8')));
   const status = await sidecarStatus(root, join(directory, 'data'));
   assert.equal(resolve(status.model.configDirectory), join(directory, 'data/pi'));
-  assert.equal(status.model.configured, false);
-  assert.notEqual(status.model.provider, 'developer-fixture');
+  assert.equal(status.model.configured, homeState === 'synthetic-private-config');
+  if (homeState === 'synthetic-private-config') {
+    assert.equal(status.model.provider, 'developer-fixture');
+    assert.equal(status.model.model, 'private-fixture');
+    const auth = join(directory, 'data/pi/auth.json');
+    assert.equal(await realpath(auth), auth);
+    assert.deepEqual(JSON.parse(await readFile(auth, 'utf8')), JSON.parse(sourceBefore[2]));
+    assert.deepEqual(await Promise.all(sourcePaths.map(path => readFile(path, 'utf8'))), sourceBefore);
+  } else {
+    assert.notEqual(status.model.provider, 'developer-fixture');
+  }
+  assert.ok(!JSON.stringify(status).includes('synthetic-'));
   const npmVersion = execFileSync(process.execPath, [join(runtime, 'lib/node_modules/npm/bin/npm-cli.js'), '--version'], { encoding: 'utf8', env: process.env }).trim();
   const executable = await findBrowserExecutable('/missing/developer/browser');
   assert.equal(executable, await realpath(join(runtime, 'browser/chrome-headless-shell')));
@@ -177,11 +190,11 @@ if (isMain && process.argv[2] === '--worker') {
         const legacy = join(environment.HOME, '.pi/agent');
         await mkdir(legacy, { recursive: true });
         await writeFile(join(legacy, 'settings.json'), JSON.stringify({ defaultProvider: 'developer-fixture', defaultModel: 'private-fixture' }));
-        await writeFile(join(legacy, 'auth.json'), JSON.stringify({ 'developer-fixture': { type: 'api_key', key: 'synthetic-credential-must-not-load' } }));
+        await writeFile(join(legacy, 'auth.json'), JSON.stringify({ 'developer-fixture': { type: 'api_key', key: 'synthetic-pi-fixture-key' } }));
         await writeFile(join(legacy, 'models.json'), JSON.stringify({ providers: { 'developer-fixture': { api: 'openai-completions', baseUrl: 'http://127.0.0.1:1', models: [{ id: 'private-fixture', name: 'private-fixture', contextWindow: 4096, maxTokens: 1024 }] } } }));
         await writeFile(join(environment.HOME, '.npmrc'), 'registry=http://127.0.0.1:1\n');
         environment.PI_CODING_AGENT_DIR = legacy;
-        environment.OPENAI_API_KEY = 'synthetic-credential-must-not-load';
+        environment.OPENAI_API_KEY = 'synthetic-environment-key';
         environment.ANOTHER_YOU_BROWSER_EXECUTABLE = '/missing/private-browser';
         environment.PLAYWRIGHT_BROWSERS_PATH = '/missing/private-browser-cache';
       }

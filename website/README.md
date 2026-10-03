@@ -28,7 +28,8 @@ You can also open [index.html](index.html) directly. If the browser does not per
 | [styles.css](styles.css) | Layout, typography, responsive styles, reduced motion |
 | [locales.js](locales.js), [i18n.js](i18n.js) | Translation dictionaries, language resolution, metadata, and RTL |
 | [script.js](script.js) | Scenario selection, demo decisions, reset, copying |
-| [mark.svg](mark.svg) | Project brand mark |
+| [logo-light.png](logo-light.png), [logo-dark.png](logo-dark.png) | Approved brand artwork for light and dark surfaces |
+| [favicon-light.png](favicon-light.png), [favicon-dark.png](favicon-dark.png), [apple-touch-icon.png](apple-touch-icon.png) | Browser icons with system appearance support and the Apple touch icon |
 
 The demo has time, event, and idle scenarios. Clicking a tab or using arrow keys, Home, or End selects a scenario. Each scenario keeps its own draft/snooze/ignore choice in page memory and can be reset independently. Reloading the page clears the choices.
 

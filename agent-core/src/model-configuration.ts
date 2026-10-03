@@ -3,11 +3,11 @@ import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/pro
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import {
   clampThinkingLevel, createModels, getSupportedThinkingLevels, lazyStream,
-  type Api, type AuthInteraction, type AuthType, type Context, type CredentialStore,
+  type Api, type AuthInteraction, type AuthType, type Context, type Credential, type CredentialStore,
   type Model, type ModelsSimpleStreamOptions, type ModelsStore, type ModelThinkingLevel, type MutableModels,
   type ProviderHeaders,
 } from "@earendil-works/pi-ai";
-import { ModelRuntime, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, ModelRuntime, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { piDirectoryForDataDir } from "./config.ts";
 
 const { getConfigValueEnvVarNames, isCommandConfigValue } = await import(new URL(
@@ -32,6 +32,18 @@ export interface CatalogProvider {
   credentialType?: AuthType;
   authMethods: { type: AuthType; name: string }[];
   configurationIssue?: string;
+  apiConfiguration?: { baseUrl: string; api: string };
+}
+
+const CONFIGURATION_APIS = new Set(["openai-completions", "openai-responses", "anthropic-messages"]);
+
+export interface ApiConfigurationInput {
+  provider: string;
+  baseUrl: string;
+  api: string;
+  model: string;
+  apiKey?: string;
+  thinkingLevel?: string;
 }
 
 export interface ModelCatalog {
@@ -43,6 +55,12 @@ export interface ModelCatalog {
 
 interface PiStorageModules {
   AuthStorage: { create(path: string): CredentialStore };
+  ReadOnlyAuthStorage: new (path: string) => CredentialStore;
+  ModelConfig: { load(path: string): Promise<{
+    getProviderIds(): readonly string[];
+    getProvider(id: string): unknown;
+    getError(): string | undefined;
+  }> };
   FileModelsStore: new (path: string) => ModelsStore;
   resolveConfiguredModelHeaders(model: Model<Api>, config: unknown, extension: undefined, env?: Record<string, string>): ProviderHeaders | undefined;
 }
@@ -52,12 +70,14 @@ function piStorageModules(): Promise<PiStorageModules> {
   // Pi 0.99.2 未从包根导出磁盘存储；保留原生文件锁及 OAuth 刷新写入语义。
   return storageModules ??= (async () => {
     const root = import.meta.resolve("@earendil-works/pi-coding-agent");
-    const [auth, models, composer] = await Promise.all([
+    const [auth, models, composer, config] = await Promise.all([
       import(new URL("./core/auth-storage.js", root).href),
       import(new URL("./core/models-store.js", root).href),
       import(new URL("./core/provider-composer.js", root).href),
+      import(new URL("./core/model-config.js", root).href),
     ]);
-    return { AuthStorage: auth.AuthStorage, FileModelsStore: models.FileModelsStore,
+    return { AuthStorage: auth.AuthStorage, ReadOnlyAuthStorage: auth.ReadOnlyAuthStorage,
+      ModelConfig: config.ModelConfig, FileModelsStore: models.FileModelsStore,
       resolveConfiguredModelHeaders: composer.resolveConfiguredModelHeaders };
   })();
 }
@@ -74,7 +94,7 @@ export function hasExternalConfigurationValue(value: unknown): boolean {
 
 async function jsonFile(path: string, missing: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
   try {
-    const value: unknown = JSON.parse(await readFile(path, "utf8"));
+    const value: unknown = JSON.parse((await readFile(path, "utf8")).replace(/^\uFEFF/, ""));
     if (!record(value)) throw new Error();
     return value;
   } catch (error) {
@@ -107,6 +127,7 @@ export class ModelConfiguration {
   private providerConfiguration: Record<string, unknown> = {};
   private catalog: ModelCatalog = { models: [], providers: [] };
   private configurationError?: string;
+  private discoveryError?: string;
   private readonly configureModels?: (models: MutableModels) => void;
 
   constructor(dataDir: string, configureModels?: (models: MutableModels) => void) {
@@ -126,7 +147,7 @@ export class ModelConfiguration {
 
   get message(): string {
     if (this.configurationError) return this.configurationError;
-    if (!this.catalog.selected) return "请在设置中选择模型并配置账户";
+    if (!this.catalog.selected) return this.discoveryError ?? "请在设置中选择模型并配置账户";
     if (!this.selection) return `所选 Pi 模型不存在：${this.catalog.selected.provider}/${this.catalog.selected.model}`;
     if (!this.selection.configured) return "请在设置中配置此提供方的认证";
     return "模型配置已保存；发送请求后验证可用性";
@@ -137,6 +158,7 @@ export class ModelConfiguration {
     this.credentials = undefined;
     this.settings = undefined;
     this.configurationError = undefined;
+    this.discoveryError = undefined;
     this.providerConfiguration = {};
     this.catalog = { models: [], providers: [] };
     try {
@@ -152,6 +174,7 @@ export class ModelConfiguration {
         catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
         await chmod(path, 0o600);
       }
+      await this.discoverPiConfiguration();
       const sdk = await piStorageModules();
       const credentials = sdk.AuthStorage.create(join(this.directory, "auth.json"));
       const rawModels = await jsonFile(join(this.directory, "models.json"));
@@ -179,6 +202,62 @@ export class ModelConfiguration {
     }
   }
 
+  private async discoverPiConfiguration(): Promise<void> {
+    const marker = join(this.directory, "pi-discovery.json");
+    const source = resolve(getAgentDir());
+    if (source === resolve(this.directory)) return;
+    const temporaryModels = join(this.directory, `models.${randomUUID()}.json`);
+    try {
+      if ((await jsonFile(marker)).version === 1) return;
+      const sdk = await piStorageModules();
+      const sourceModels = await sdk.ModelConfig.load(join(source, "models.json"));
+      if (sourceModels.getError()) throw new Error("models.json");
+      const sourceAuth = new sdk.ReadOnlyAuthStorage(join(source, "auth.json"));
+      await sourceAuth.list();
+      const rawAuth = await jsonFile(join(source, "auth.json"));
+      const settings = SettingsManager.create(source, source, { projectTrusted: false });
+      if (settings.drainErrors().length) throw new Error("settings.json");
+      const sourceSettings = settings.getGlobalSettings();
+      const providers = Object.fromEntries(sourceModels.getProviderIds().map(id => [id, sourceModels.getProvider(id)]));
+      if (!Object.keys(providers).length && !Object.keys(rawAuth).length
+        && !sourceSettings.defaultProvider && !sourceSettings.defaultModel) return;
+
+      const localModels = await jsonFile(join(this.directory, "models.json"));
+      const localAuth = await jsonFile(join(this.directory, "auth.json"));
+      const localSettings = await jsonFile(join(this.directory, "settings.json"));
+      const mergedModels = { ...localModels, providers: { ...providers,
+        ...(record(localModels.providers) ? localModels.providers : {}) } };
+      await writeJSON(temporaryModels, mergedModels);
+      const validation = await ModelRuntime.create({ modelsPath: temporaryModels,
+        credentials: sdk.AuthStorage.create(join(this.directory, "auth.json")),
+        modelsStorePath: join(this.directory, "models-store.json"), allowModelNetwork: false, refreshOnCreate: false });
+      if (validation.getError()) throw new Error("models.json");
+      const mergedSettings = { ...localSettings };
+      if (!Object.hasOwn(localSettings, "defaultProvider") && !Object.hasOwn(localSettings, "defaultModel")
+        && typeof sourceSettings.defaultProvider === "string" && typeof sourceSettings.defaultModel === "string") {
+        const model = validation.getModel(sourceSettings.defaultProvider, sourceSettings.defaultModel);
+        if (!model) throw new Error("settings.json");
+        mergedSettings.defaultProvider = model.provider;
+        mergedSettings.defaultModel = model.id;
+      }
+      if (!Object.hasOwn(localSettings, "defaultThinkingLevel") && sourceSettings.defaultThinkingLevel !== undefined) {
+        mergedSettings.defaultThinkingLevel = sourceSettings.defaultThinkingLevel;
+      }
+      mergedSettings.modelThinkingLevels = { ...sourceSettings.modelThinkingLevels,
+        ...(record(localSettings.modelThinkingLevels) ? localSettings.modelThinkingLevels : {}) };
+      // 自动复用是独立快照；记录成功后不再覆盖用户编辑，也不恢复用户已注销的账户。
+      await writeJSON(join(this.directory, "models.json"), mergedModels);
+      await writeJSON(join(this.directory, "auth.json"), { ...rawAuth, ...localAuth });
+      await writeJSON(join(this.directory, "settings.json"), mergedSettings);
+      await writeJSON(marker, { version: 1 });
+    } catch {
+      // 本机 Pi 文件损坏不应让已有的应用配置失效；下次重新读取仍会重试。
+      this.discoveryError = "本机 Pi 配置无法自动读取，请检查 Pi 配置后重新读取";
+    } finally {
+      await rm(temporaryModels, { force: true });
+    }
+  }
+
   private async updateCatalog(): Promise<void> {
     if (!this.models || !this.credentials) throw new Error("Pi 模型目录尚未加载");
     const rawAuth = await jsonFile(join(this.directory, "auth.json"));
@@ -198,8 +277,24 @@ export class ModelConfiguration {
       const authMethods: CatalogProvider["authMethods"] = [];
       if (provider.auth.apiKey?.login) authMethods.push({ type: "api_key", name: provider.auth.apiKey.name });
       if (provider.auth.oauth) authMethods.push({ type: "oauth", name: provider.auth.oauth.loginLabel ?? provider.auth.oauth.name });
+      const providerModels = this.models!.getModels().filter(model => model.provider === provider.id && CONFIGURATION_APIS.has(model.api));
+      const apiModel = providerModels.find(model => this.settings?.getDefaultProvider() === provider.id && this.settings.getDefaultModel() === model.id)
+        ?? providerModels.find(model => model.api === "openai-responses") ?? providerModels[0];
+      const editableAPI = ["openai", "anthropic"].includes(provider.id)
+        || (!provider.auth.oauth && record(providerConfig) && typeof providerConfig.api === "string" && CONFIGURATION_APIS.has(providerConfig.api));
+      let publicBaseUrl = "";
+      if (apiModel) {
+        try {
+          const url = new URL(apiModel.baseUrl);
+          if (["http:", "https:"].includes(url.protocol)) {
+            url.username = ""; url.password = ""; url.search = ""; url.hash = "";
+            publicBaseUrl = url.toString();
+          }
+        } catch { /* 保留地址输入入口，让用户修复无效端点。 */ }
+      }
       return { id: provider.id, name: provider.name, configured, authMethods,
         ...(metadata.has(provider.id) ? { credentialType: metadata.get(provider.id)! } : {}),
+        ...(editableAPI && apiModel && provider.auth.apiKey ? { apiConfiguration: { baseUrl: publicBaseUrl, api: apiModel.api } } : {}),
         ...(external ? { configurationIssue: "凭据使用环境变量或命令，请在应用内配置账户并移除外部引用" } : {}) };
     }));
     const availableProviders = new Set(providers.filter(provider => provider.configured).map(provider => provider.id));
@@ -214,7 +309,7 @@ export class ModelConfiguration {
         maxTokens: model.maxTokens, configured: availableProviders.has(model.provider) })),
       providers: providers.sort((a, b) => a.name.localeCompare(b.name)),
       ...(provider && modelId ? { selected: { provider, model: modelId, thinkingLevel: model ? clampThinkingLevel(model, requested) : "off" } } : {}),
-      ...(this.configurationError ? { message: this.configurationError } : {}),
+      ...(this.configurationError || this.discoveryError ? { message: this.configurationError ?? this.discoveryError } : {}),
     };
   }
 
@@ -232,6 +327,107 @@ export class ModelConfiguration {
     if (this.settings.drainErrors().length) throw new Error("模型设置保存失败");
     await chmod(join(this.directory, "settings.json"), 0o600);
     await this.updateCatalog();
+  }
+
+  async configureAPI(input: ApiConfigurationInput, signal?: AbortSignal): Promise<void> {
+    if (!this.models || !this.credentials || !this.settings || this.configurationError) throw new Error(this.message);
+    const provider = input.provider.trim(), modelId = input.model.trim(), baseUrl = input.baseUrl.trim();
+    for (const value of [provider, modelId, baseUrl]) {
+      if (!value || value.length > 8192 || /[\x00-\x1f\x7f]/.test(value)) throw new Error("提供方、接口地址和模型 ID 不能为空或包含控制字符");
+    }
+    if (["__proto__", "constructor", "prototype"].includes(provider)) throw new Error("提供方名称无效");
+    if (!CONFIGURATION_APIS.has(input.api)) throw new Error("请选择支持的 API 协议");
+    try {
+      const url = new URL(baseUrl);
+      if (!["http:", "https:"].includes(url.protocol) || !url.hostname || url.username || url.password || url.search || url.hash || /\s/.test(baseUrl)) throw new Error();
+    } catch { throw new Error("请输入有效的 HTTP 或 HTTPS 接口地址，不能包含凭据、查询参数或片段"); }
+    if (input.apiKey !== undefined && (typeof input.apiKey !== "string" || input.apiKey.length > 8192)) throw new Error("API Key 无效");
+    const key = input.apiKey?.trim();
+    if (key && /\s|[\x00-\x1f\x7f]/.test(key)) throw new Error("API Key 无效");
+    if (key && hasExternalConfigurationValue(key)) throw new Error("请输入凭据本身，不能使用环境变量或命令");
+    const knownProvider = this.catalog.providers.find(item => item.id === provider);
+    if (knownProvider && !knownProvider.apiConfiguration) throw new Error("此提供方需要使用原有账户配置方式");
+
+    const modelsPath = join(this.directory, "models.json"), settingsPath = join(this.directory, "settings.json");
+    const originalModels = await jsonFile(modelsPath), originalSettings = await jsonFile(settingsPath);
+    const rawAuth = await jsonFile(join(this.directory, "auth.json"));
+    const stored = rawAuth[provider];
+    if (!key && (!record(stored) || stored.type !== "api_key" || typeof stored.key !== "string" || !stored.key.trim()
+      || hasExternalConfigurationValue(stored) || !knownProvider?.configured)) throw new Error("请输入 API Key");
+    if (!record(originalModels.providers)) throw new Error("models.json 必须包含 providers 对象");
+    const previous = record(originalModels.providers[provider]) ? originalModels.providers[provider] : {};
+    const definitions = Array.isArray(previous.models) ? previous.models : [];
+    const existing = this.models.getModel(provider, modelId);
+    const existingDefinition = definitions.find(item => record(item) && item.id === modelId);
+    const definition: Record<string, unknown> = { ...(existing ? { name: existing.name, reasoning: existing.reasoning, input: existing.input,
+      thinkingLevelMap: existing.thinkingLevelMap, inputLimits: existing.inputLimits, cost: existing.cost,
+      promptCache: existing.promptCache, contextWindow: existing.contextWindow, maxTokens: existing.maxTokens,
+      samplingParams: existing.samplingParams, ...(existing.api === input.api ? { compat: existing.compat } : {}) } : {}),
+      ...(record(existingDefinition) ? existingDefinition : {}), id: modelId, api: input.api, baseUrl };
+    const updatedProvider: Record<string, unknown> = { ...previous, baseUrl, api: input.api,
+      models: [...definitions.filter(item => !record(item) || item.id !== modelId), definition] };
+    const credentialFields = [updatedProvider, definition];
+    if (record(previous.modelOverrides) && record(previous.modelOverrides[modelId])) {
+      const override = { ...previous.modelOverrides[modelId] };
+      updatedProvider.modelOverrides = { ...previous.modelOverrides, [modelId]: override };
+      credentialFields.push(override);
+    }
+    // 已有认证 header 不能继续覆盖界面刚保存的账户密钥。
+    for (const fields of credentialFields) {
+      delete fields.apiKey;
+      if (record(fields.headers)) {
+        const headers = Object.fromEntries(Object.entries(fields.headers)
+          .filter(([name]) => !["authorization", "x-api-key", "api-key"].includes(name.toLowerCase())));
+        if (Object.keys(headers).length) fields.headers = headers;
+        else delete fields.headers;
+      }
+    }
+    if (hasExternalConfigurationValue(updatedProvider)) throw new Error("凭据使用环境变量或命令，请在应用内配置账户并移除外部引用");
+    const updated = { ...originalModels, providers: { ...originalModels.providers, [provider]: updatedProvider } };
+    const temporary = join(this.directory, `models.${randomUUID()}.json`);
+    const credentials = this.credentials;
+    let previousCredential: Credential | undefined;
+    let credentialWritten = false, modelsWritten = false, selectionWritten = false;
+    try {
+      signal?.throwIfAborted();
+      await writeJSON(temporary, updated);
+      const validation = await ModelRuntime.create({ modelsPath: temporary, credentials,
+        modelsStorePath: join(this.directory, "models-store.json"), allowModelNetwork: false, refreshOnCreate: false });
+      const validatedModel = validation.getModel(provider, modelId);
+      if (validation.getError() || !validatedModel) throw new Error("模型配置无效，请检查接口地址和模型");
+      if (input.thinkingLevel !== undefined && !getSupportedThinkingLevels(validatedModel).includes(input.thinkingLevel as ModelThinkingLevel)) {
+        throw new Error("此模型不支持所选思考深度");
+      }
+      signal?.throwIfAborted();
+      if (key) {
+        await credentials.modify(provider, async current => { previousCredential = current; return { type: "api_key", key }; }, { signal });
+        credentialWritten = true;
+        await chmod(join(this.directory, "auth.json"), 0o600);
+      }
+      signal?.throwIfAborted();
+      await writeJSON(modelsPath, updated);
+      modelsWritten = true;
+      await this.load();
+      if (this.configurationError) throw new Error(this.message);
+      signal?.throwIfAborted();
+      selectionWritten = true;
+      await this.select(provider, modelId, input.thinkingLevel);
+      signal?.throwIfAborted();
+    } catch (error) {
+      if (credentialWritten || modelsWritten || selectionWritten) {
+        try {
+          if (modelsWritten) await writeJSON(modelsPath, originalModels);
+          if (selectionWritten) await writeJSON(settingsPath, originalSettings);
+          if (credentialWritten) {
+            if (previousCredential) await credentials.modify(provider, async () => previousCredential);
+            else await credentials.delete(provider);
+            await chmod(join(this.directory, "auth.json"), 0o600);
+          }
+          await this.load();
+        } catch { throw new Error("模型配置保存失败，请重新读取并检查配置文件"); }
+      }
+      throw error;
+    } finally { await rm(temporary, { force: true }); }
   }
 
   async login(provider: string, type: AuthType, interaction: AuthInteraction): Promise<void> {

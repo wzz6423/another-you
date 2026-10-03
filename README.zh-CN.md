@@ -35,7 +35,7 @@ make deps
 make run
 ```
 
-`make run` 构建并启动 `dist/dev/Another You.app`。模型统一在本机 Pi 配置，包括本地模型；在 Pi `/model` 中按 Ctrl+S 保存默认模型后，在 **设置 → 模型** 点击 **重新读取 Pi 配置**。Another You 直接使用 Pi 的认证和模型设置。
+`make run` 以 Debug 配置构建并启动 `dist/dev/Another You.app`，在 macOS 中显示为 **Another You Debug**。调试应用使用独立标识与 `~/Library/Application Support/AnotherYouDebug/` 数据目录；`ANOTHER_YOU_DATA_DIR` 可覆盖。模型统一在本机 Pi 配置，包括本地模型；在 Pi `/model` 中按 Ctrl+S 保存默认模型后，在 **设置 → 模型** 点击 **重新读取 Pi 配置**。Another You 直接使用 Pi 的认证和模型设置。
 
 保存配置不等于连接验证。提交一条提问或批准生成草稿后，才能验证模型请求是否成功；失败会显示在应用中。
 
@@ -52,11 +52,11 @@ make update  # 根据本地源码重建并重启，不执行 git pull
 
 | 命令 | 用途 |
 | --- | --- |
-| `make build` | 构建 Swift 可执行文件。 |
+| `make build` | 仅编译 Debug Swift 可执行文件，不打包或启动。 |
 | `make check` | 检查 TypeScript、官网 JavaScript 与 Shell 语法。 |
 | `make test` | 运行 Agent、Swift、开发脚本和发布工具测试。 |
 | `make test-release` | 验证发布签名、元数据与双端上传流程。 |
-| `make build-package` | 在 `dist/macos` 生成独立的开发 `.app`。 |
+| `make build-package` | 在 `dist/macos` 打包 Release `.app`，不启动应用。 |
 | `make website` | 在 `http://127.0.0.1:4173` 预览静态官网。 |
 | `make pi-source` | 将锁定的上游源码拉取到 `agent-core/.cache/pi`。 |
 | `make clean` | 停止受管理的开发应用，清理已知构建与测试产物。 |

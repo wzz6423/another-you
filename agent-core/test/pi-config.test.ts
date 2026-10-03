@@ -7,20 +7,30 @@ import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { createDefaultConfig } from "../src/config.ts";
 import { PiSdkBackend } from "../src/pi-adapter.ts";
+import { ModelCommandHandler } from "../src/model-commands.ts";
+import type { AgentEvent } from "../src/events.ts";
 import { usePiFixture } from "./pi-fixture.ts";
 
-async function fixture(t: TestContext, hang = false) {
+async function fixture(t: TestContext, hang = false, acceptedKey?: string) {
   const dataDir = await mkdtemp(join(tmpdir(), "another-you-pi-config-"));
   t.after(() => rm(dataDir, { recursive: true, force: true }));
-  const requests: { body: Record<string, unknown>; authorization?: string }[] = [];
+  const requests: { body: Record<string, unknown>; authorization?: string; path?: string }[] = [];
   let received!: () => void;
   const requested = new Promise<void>((done) => { received = done; });
+  let disconnected!: () => void;
+  const closed = new Promise<void>((done) => { disconnected = done; });
   const server = createServer(async (req, res) => {
+    res.once("close", disconnected);
     let raw = "";
     for await (const part of req) raw += part;
-    requests.push({ body: JSON.parse(raw), authorization: req.headers.authorization });
+    requests.push({ body: JSON.parse(raw), authorization: req.headers.authorization, path: req.url });
     received();
     if (hang) return;
+    if (acceptedKey && req.headers.authorization !== `Bearer ${acceptedKey}`) {
+      res.writeHead(401, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: { message: "Fixture rejected credentials", type: "authentication_error" } }));
+      return;
+    }
     res.writeHead(200, { "content-type": "text/event-stream" });
     const chunk = { id: "fixture", choices: [{ index: 0, delta: { role: "assistant", content: "Pi 配置请求完成" }, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 4, total_tokens: 14 } };
     res.end(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`);
@@ -33,7 +43,7 @@ async function fixture(t: TestContext, hang = false) {
   const directory = await usePiFixture(t, dataDir, `http://127.0.0.1:${address.port}/v1`);
   const backend = new PiSdkBackend(createDefaultConfig(dataDir));
   t.after(() => backend.close());
-  return { backend, directory, requests, requested };
+  return { backend, directory, requests, requested, closed, endpoint: `http://127.0.0.1:${address.port}/v1` };
 }
 
 test("Pi 原生默认模型、认证和每模型思考深度用于实际请求且不改配置", async (t) => {
@@ -123,4 +133,128 @@ test("运行中的 Pi 请求保持模型快照，刷新立即返回并可取消"
   await f.backend.reloadModelConfiguration();
   assert.equal(f.backend.status().configured, false);
   assert.equal(f.backend.status().model, "");
+});
+
+test("账户配置到模型选择和连接测试经过实际HTTP，失败后重新配置恢复且不提供工具或写聊天", async t => {
+  const f = await fixture(t, false, "working-fixture-key");
+  await writeFile(join(f.directory, "auth.json"), "{}");
+  await writeFile(join(f.directory, "settings.json"), "{}");
+  await f.backend.initialize();
+  const events: AgentEvent[] = [];
+  const statuses: ReturnType<PiSdkBackend["status"]>[] = [];
+  const commands = new ModelCommandHandler(f.backend, event => events.push(event), () => statuses.push(f.backend.status()));
+  t.after(() => commands.close());
+  async function waitFor(match: (event: AgentEvent) => boolean): Promise<AgentEvent> {
+    const deadline = Date.now() + 3000;
+    while (Date.now() < deadline) {
+      const found = events.find(match);
+      if (found) return found;
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+    assert.fail("等待模型配置回执超时");
+  }
+  const finished = (id: string, state: string) => waitFor(event => event.kind === "model.operation" && event.payload.requestId === id && event.payload.state === state);
+  async function login(id: string, key: string) {
+    commands.handle({ op: "modelLogin", requestId: id, provider: "fixture-provider", authType: "api_key" });
+    const prompt = await waitFor(event => event.kind === "model.auth" && event.payload.requestId === id && event.payload.stage === "prompt");
+    commands.handle({ op: "modelAuthReply", requestId: id, promptId: (prompt.payload.prompt as { id: string }).id, value: key });
+    return finished(id, "succeeded");
+  }
+
+  commands.handle({ op: "modelTest", requestId: "missing" });
+  await finished("missing", "failed");
+  assert.equal(f.requests.length, 0);
+  const saved = await login("bad-account", "invalid-fixture-key");
+  assert.equal(saved.payload.message, "账户已保存，请选择模型");
+  assert.equal(f.backend.status().configured, false);
+  commands.handle({ op: "modelSelect", requestId: "select", provider: "fixture-provider", model: "fixture", thinkingLevel: "off" });
+  await finished("select", "succeeded");
+  assert.equal(f.backend.status().configured, true);
+  assert.equal(f.backend.status().available, null);
+  assert.equal(f.requests.length, 0);
+
+  commands.handle({ op: "modelTest", requestId: "reject" });
+  await finished("reject", "failed");
+  assert.equal(statuses.at(-1)?.available, false);
+  await login("good-account", "working-fixture-key");
+  assert.equal(f.backend.status().available, null);
+  commands.handle({ op: "modelTest", requestId: "connect" });
+  await finished("connect", "succeeded");
+  assert.equal(statuses.at(-1)?.available, true);
+  assert.equal(f.requests.length, 2);
+  for (const request of f.requests) {
+    assert.equal(request.body.model, "fixture");
+    assert.ok(request.body.tools === undefined || (Array.isArray(request.body.tools) && request.body.tools.length === 0));
+    const messages = request.body.messages as { role: string; content: unknown }[];
+    assert.equal(messages.filter(message => message.role === "user").length, 1);
+    assert.ok(JSON.stringify(messages).includes('Return only'));
+  }
+  await assert.rejects(readFile(join(f.directory, "..", "state.json")));
+  assert.ok(events.every(event => event.kind.startsWith("model.")));
+});
+
+test("完整 API 表单从空配置保存并经实际 HTTP 验证，错误密钥修复后恢复连接", async t => {
+  const f = await fixture(t, false, "working-gateway-key");
+  for (const name of ["models.json", "settings.json", "auth.json"]) {
+    await writeFile(join(f.directory, name), name === "models.json" ? '{"providers":{}}' : "{}");
+  }
+  await f.backend.initialize();
+  const events: AgentEvent[] = [];
+  const commands = new ModelCommandHandler(f.backend, event => events.push(event));
+  t.after(() => commands.close());
+  async function finished(id: string, state: string) {
+    const deadline = Date.now() + 3000;
+    while (Date.now() < deadline) {
+      if (events.some(event => event.kind === "model.operation" && event.payload.requestId === id && event.payload.state === state)) return;
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+    assert.fail(`等待 ${id} ${state} 回执超时`);
+  }
+  const input = { op: "modelConfigure", provider: "custom-gateway", model: "gateway-model", baseUrl: f.endpoint, api: "openai-completions", thinkingLevel: "off" };
+  commands.handle({ ...input, requestId: "bad-key", apiKey: "wrong-gateway-key" });
+  await finished("bad-key", "succeeded");
+  assert.equal(f.backend.status().available, null);
+  assert.equal(f.requests.length, 0);
+  commands.handle({ op: "modelTest", requestId: "rejected" });
+  await finished("rejected", "failed");
+  assert.equal(f.backend.status().available, false);
+  commands.handle({ ...input, requestId: "fix-key", apiKey: "working-gateway-key" });
+  await finished("fix-key", "succeeded");
+  await f.backend.reloadModelConfiguration();
+  commands.handle({ op: "modelTest", requestId: "connected" });
+  await finished("connected", "succeeded");
+  assert.equal(f.backend.status().available, true);
+  assert.equal(f.requests.length, 2);
+  assert.equal(f.requests[1].path, "/v1/chat/completions");
+  assert.equal(f.requests[1].body.model, "gateway-model");
+  assert.equal(f.requests[1].authorization, "Bearer working-gateway-key");
+  assert.ok(!f.requests[1].body.tools || (f.requests[1].body.tools as unknown[]).length === 0);
+  assert.equal(JSON.stringify(events).includes("working-gateway-key"), false);
+  assert.equal(JSON.stringify(events).includes("wrong-gateway-key"), false);
+  await assert.rejects(readFile(join(f.directory, "..", "state.json")));
+});
+
+test("连接测试取消终止实际 HTTP 请求并解除配置互斥", { timeout: 5000 }, async t => {
+  const f = await fixture(t, true);
+  await f.backend.initialize();
+  const events: AgentEvent[] = [];
+  let finish!: () => void;
+  const finished = new Promise<void>(resolve => { finish = resolve; });
+  const commands = new ModelCommandHandler(f.backend, event => events.push(event), finish);
+  t.after(() => commands.close());
+  commands.handle({ op: "modelTest", requestId: "test" });
+  await f.requested;
+  commands.handle({ op: "modelSelect", requestId: "busy", provider: "fixture-provider", model: "fixture" });
+  assert.ok(events.some(event => event.payload.requestId === "busy" && event.payload.state === "failed"));
+  commands.handle({ op: "modelAuthCancel", requestId: "stale" });
+  assert.equal(f.backend.isBusy, true);
+  commands.handle({ op: "modelAuthCancel", requestId: "test" });
+  await finished;
+  await f.closed;
+  assert.equal(f.backend.isBusy, false);
+  assert.ok(events.some(event => event.payload.requestId === "test" && event.payload.state === "cancelled"));
+  assert.ok(!events.some(event => event.payload.requestId === "test" && event.payload.state === "succeeded"));
+  assert.equal(f.requests.length, 1);
+  await f.backend.changeModelConfiguration(() => f.backend.modelConfiguration.select("fixture-provider", "fixture", "off"));
+  assert.equal(f.backend.status().available, null);
 });

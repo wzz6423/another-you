@@ -9,7 +9,9 @@
     <meta property="og:description" content="为 macOS 而生的主动个人 AI 助手。本地优先，少一点打扰，多一点恰逢其时。" data-i18n-content="为 macOS 而生的主动个人 AI 助手。本地优先，少一点打扰，多一点恰逢其时。">
     <meta property="og:type" content="website">
     <title data-i18n="Another You · 在刚好的时候，多想一步">Another You · 在刚好的时候，多想一步</title>
-    <link rel="icon" type="image/svg+xml" href="./mark.svg">
+    <link rel="icon" type="image/png" sizes="64x64" href="./favicon-light.png">
+    <link rel="icon" type="image/png" sizes="64x64" href="./favicon-dark.png" media="(prefers-color-scheme: dark)">
+    <link rel="apple-touch-icon" sizes="180x180" href="./apple-touch-icon.png">
     <link rel="stylesheet" href="./styles.css">
     <script src="./locales.js" defer></script>
     <script src="./i18n.js" defer></script>
@@ -20,7 +22,7 @@
     <header class="site-header">
       <div class="nav-shell">
         <a class="brand" href="#top" aria-label="Another You 首页" data-i18n-aria="Another You 首页">
-          <img class="brand-mark" src="./mark.svg" width="31" height="31" alt="">
+          <img class="brand-mark" src="./logo-light.png" width="31" height="31" alt="">
           <span>Another You<span class="brand-period">.</span></span>
         </a>
         <nav class="main-nav" aria-label="主导航" data-i18n-aria="主导航">
@@ -94,7 +96,7 @@
             <p class="demo-hint"><span data-i18n="选择一个时机，试着回应它。">选择一个时机，试着回应它。</span><span aria-hidden="true">⤴</span></p>
           </div>
           <div class="demo-stage">
-            <div class="demo-topline"><span class="demo-brand"><img src="./mark.svg" width="23" height="23" alt=""> Another You</span><span class="demo-label"><span data-i18n="互动演示">互动演示</span></span></div>
+            <div class="demo-topline"><span class="demo-brand"><img src="./logo-light.png" width="23" height="23" alt=""> Another You</span><span class="demo-label"><span data-i18n="互动演示">互动演示</span></span></div>
             <div id="demo-panel" class="demo-panel" role="tabpanel" tabindex="0" aria-labelledby="tab-morning">
               <div class="demo-source"><span class="status-dot" aria-hidden="true"></span><span id="demo-source"><span data-i18n="晨间规则">晨间规则</span></span><span id="demo-time">09:00</span></div>
               <div id="suggestion-view">
@@ -118,7 +120,7 @@
         <div class="privacy-inner section-shell">
           <div class="privacy-copy"><p class="eyebrow"><span data-i18n="只属于你">只属于你</span></p><h2 id="privacy-title"><span data-i18n="离你的生活很近。">离你的生活很近。</span><br><span data-i18n="离别人的服务器，">离别人的服务器，</span><br><span><span data-i18n="可以很远。">可以很远。</span></span></h2><p><span data-i18n="个人助手，应该先是「个人」的。">个人助手，应该先是「个人」的。</span><br><span data-i18n="从本机开始，用你选择的模型，">从本机开始，用你选择的模型，</span><br><span data-i18n="让每一项能力都有清楚的边界。">让每一项能力都有清楚的边界。</span></p><a class="text-link privacy-link" href="#start"><span data-i18n="在自己的 Mac 上运行">在自己的 Mac 上运行</span> <span aria-hidden="true">↗</span></a></div>
           <div class="privacy-details">
-            <div class="local-diagram" aria-label="本机上的 SwiftUI 界面连接主动引擎和你配置的模型" data-i18n-aria="本机上的 SwiftUI 界面连接主动引擎和你配置的模型"><div class="device-top"><span class="device-caption"><span data-i18n="你的 Mac">你的 Mac</span></span><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><rect x="3" y="3.5" width="14" height="10" rx="1.5" stroke="currentColor" stroke-width="1.2"/></rect><path d="M7 16.5h6M10 13.5v3" stroke="currentColor" stroke-width="1.2"/></path></svg></div><div class="local-node"><img src="./mark.svg" width="28" height="28" alt=""><span>Another You</span><small><span data-i18n="原生界面">原生界面</span></small></div><div class="node-connector" aria-hidden="true"><span></span></div><div class="local-node"><span class="engine-mark" aria-hidden="true">π</span><span><span data-i18n="主动引擎">主动引擎</span></span><small><span data-i18n="本地运行">本地运行</span></small></div><div class="model-connection"><span aria-hidden="true">↳</span> <span data-i18n="模型连接，由你配置">模型连接，由你配置</span></div></div>
+            <div class="local-diagram" aria-label="本机上的 SwiftUI 界面连接主动引擎和你配置的模型" data-i18n-aria="本机上的 SwiftUI 界面连接主动引擎和你配置的模型"><div class="device-top"><span class="device-caption"><span data-i18n="你的 Mac">你的 Mac</span></span><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><rect x="3" y="3.5" width="14" height="10" rx="1.5" stroke="currentColor" stroke-width="1.2"/></rect><path d="M7 16.5h6M10 13.5v3" stroke="currentColor" stroke-width="1.2"/></path></svg></div><div class="local-node"><img src="./logo-dark.png" width="28" height="28" alt=""><span>Another You</span><small><span data-i18n="原生界面">原生界面</span></small></div><div class="node-connector" aria-hidden="true"><span></span></div><div class="local-node"><span class="engine-mark" aria-hidden="true">π</span><span><span data-i18n="主动引擎">主动引擎</span></span><small><span data-i18n="本地运行">本地运行</span></small></div><div class="model-connection"><span aria-hidden="true">↳</span> <span data-i18n="模型连接，由你配置">模型连接，由你配置</span></div></div>
             <dl class="privacy-list"><div><dt><span data-i18n="数据留在你手中">数据留在你手中</span></dt><dd><span data-i18n="建议与偏好在本机保存。选择本地模型时，推理也可在本机完成。">建议与偏好在本机保存。选择本地模型时，推理也可在本机完成。</span></dd></div><div><dt><span data-i18n="能力按需开启">能力按需开启</span></dt><dd><span data-i18n="截图、工作窗口与可访问的通知需要系统权限。模型连接和网络请求由你选择的服务处理。">截图、工作窗口与可访问的通知需要系统权限。模型连接和网络请求由你选择的服务处理。</span></dd></div><div><dt><span data-i18n="随时按下暂停">随时按下暂停</span></dt><dd><span data-i18n="主动参与有开关。忙的时候，让助手安静下来，按你的节奏继续。">主动参与有开关。忙的时候，让助手安静下来，按你的节奏继续。</span></dd></div></dl>
           </div>
         </div>
@@ -133,6 +135,6 @@ make run</code></pre><p id="copy-status" class="copy-status" role="status" aria-
       </section>
     </main>
 
-    <footer class="site-footer section-shell"><div class="footer-main"><a class="brand" href="#top" aria-label="Another You 回到顶部" data-i18n-aria="Another You 回到顶部"><img class="brand-mark" src="./mark.svg" width="31" height="31" alt=""><span>Another You<span class="brand-period">.</span></span></a><p><span data-i18n="少一点打扰，多一点恰逢其时。">少一点打扰，多一点恰逢其时。</span></p><a class="back-top" href="#top"><span data-i18n="回到顶部">回到顶部</span> <span aria-hidden="true">↑</span></a></div><div class="footer-bottom"><span>© 2026 Another You</span><span><span data-i18n="为 macOS 而生 · 开发预览">为 macOS 而生 · 开发预览</span></span><nav aria-label="页脚导航" data-i18n-aria="页脚导航"><a href="#privacy"><span data-i18n="隐私原则">隐私原则</span></a><a href="#start"><span data-i18n="本地运行">本地运行</span></a></nav></div></footer>
+    <footer class="site-footer section-shell"><div class="footer-main"><a class="brand" href="#top" aria-label="Another You 回到顶部" data-i18n-aria="Another You 回到顶部"><img class="brand-mark" src="./logo-light.png" width="31" height="31" alt=""><span>Another You<span class="brand-period">.</span></span></a><p><span data-i18n="少一点打扰，多一点恰逢其时。">少一点打扰，多一点恰逢其时。</span></p><a class="back-top" href="#top"><span data-i18n="回到顶部">回到顶部</span> <span aria-hidden="true">↑</span></a></div><div class="footer-bottom"><span>© 2026 Another You</span><span><span data-i18n="为 macOS 而生 · 开发预览">为 macOS 而生 · 开发预览</span></span><nav aria-label="页脚导航" data-i18n-aria="页脚导航"><a href="#privacy"><span data-i18n="隐私原则">隐私原则</span></a><a href="#start"><span data-i18n="本地运行">本地运行</span></a></nav></div></footer>
   </body>
 </html>

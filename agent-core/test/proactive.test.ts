@@ -40,6 +40,12 @@ function fixture(options: { run?: (request: PiRequest) => Promise<PiResponse>; c
 test("旧配置迁移到低频默认值并拒绝过密、无界或无效周期", () => {
   const config = parseAgentConfig({});
   assert.deepEqual(config.proactive, DEFAULT_PROACTIVE);
+  assert.equal(createDefaultConfig().proactive.enabled, true);
+  assert.equal(config.scheduler.enabled, true);
+  assert.equal(config.proactive.enabled, true);
+  const disabled = parseAgentConfig({ scheduler: { enabled: false }, proactive: { enabled: false } });
+  assert.equal(disabled.scheduler.enabled, false);
+  assert.equal(disabled.proactive.enabled, false);
   for (const value of [0, -1, 59999, Infinity, "300000"]) assert.throws(() => parseAgentConfig({ proactive: { workIntervalMs: value } }));
   assert.throws(() => parseAgentConfig({ proactive: { collectionTimeoutMs: 15000, taskTimeoutMs: 10000 } }));
   assert.equal(parseAgentConfig({ proactive: { enabled: false, workIntervalMs: 600000 } }).proactive.workIntervalMs, 600000);

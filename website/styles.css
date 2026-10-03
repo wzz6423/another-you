@@ -28,6 +28,7 @@ a, button, summary { transition: color .2s, background-color .2s, border-color .
 h1, h2, h3, p { margin: 0; }
 h1, h2, h3 { font-family: var(--display-font); }
 svg, img { display: block; }
+.brand-mark, .demo-brand img, .local-node img { border-radius: 22%; }
 button { border: 0; }
 [hidden] { display: none !important; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
@@ -165,7 +166,6 @@ button { border: 0; }
 .device-caption { font-size: 10px; letter-spacing: .05em; }
 .device-top svg { height: 19px; width: 19px; color: #8099ba; }
 .local-node { display: flex; align-items: center; gap: 10px; padding: 13px 16px; background: #253b59; border: 1px solid #354d6b; border-radius: 8px; font-size: 12px; color: #e3ebf7; }
-.local-node img { filter: brightness(1.8) saturate(.6); }
 .local-node small { margin-inline-start: auto; font-size: 9px; color: #91a9c8; }
 .engine-mark { font-size: 27px; font-family: Georgia,serif; line-height: 28px; text-align: center; width: 28px; color: #99b4d8; }
 .node-connector { height: 20px; display: flex; justify-content: center; }

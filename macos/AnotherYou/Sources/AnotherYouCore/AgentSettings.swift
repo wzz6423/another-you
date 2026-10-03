@@ -5,9 +5,13 @@ public struct AgentSettingsRepository: Sendable {
     public var configURL: URL { dataDirectory.appendingPathComponent("config.json") }
     public var piDirectory: URL { dataDirectory.appendingPathComponent("pi", isDirectory: true) }
 
-    public init(dataDirectory: URL? = nil) {
-        self.dataDirectory = dataDirectory ?? ProcessInfo.processInfo.environment["ANOTHER_YOU_DATA_DIR"].map { URL(fileURLWithPath: $0, isDirectory: true) } ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("AnotherYou", isDirectory: true)
+    public init(
+        dataDirectory: URL? = nil,
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        bundleIdentifier: String? = Bundle.main.bundleIdentifier
+    ) {
+        self.dataDirectory = dataDirectory ?? environment["ANOTHER_YOU_DATA_DIR"].map { URL(fileURLWithPath: $0, isDirectory: true) } ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent(bundleIdentifier == "com.anotheryou.mac.debug" ? "AnotherYouDebug" : "AnotherYou", isDirectory: true)
     }
 
     public func ensureConfig() throws {

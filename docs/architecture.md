@@ -22,7 +22,7 @@ flowchart TD
     Core --> Pi[PiSdkBackend: tools disabled]
     Pi --> Fetch[Guarded HTTP fetch]
     Fetch --> Model[Loopback or explicitly allowed model service]
-    Store --> Notifications[Opt-in macOS notifications]
+    Store --> Notifications[macOS notifications with system permission]
 ```
 
 [AgentClient.swift](../macos/AnotherYou/Sources/AnotherYouCore/AgentClient.swift) owns process launch, JSONL framing, decoding, and shutdown. [AssistantStore.swift](../macos/AnotherYou/Sources/AnotherYouCore/AssistantStore.swift) updates cards and activity from real events, correlates prompt responses, and supplies idle measurements. It does not treat a sent command as a completed action.
@@ -44,8 +44,8 @@ The app and sidecar must be running for signals to be processed. Time rules matc
 | Boundary | Current implementation |
 | --- | --- |
 | Model network | `local` uses loopback only. Non-loopback requests require an authorized privacy mode, network opt-in, exact allowed hostname, and HTTPS. Each fetch rejects redirects and leaving the configured origin. |
-| Model tools | Interactive sessions register file, shell, network, background-browser, and available native-computer tools; analysis roles use no tools. User Pi configuration, extensions, skills, and default provider credentials are not loaded. |
-| Model credentials | Pi ModelRuntime resolves Pi authentication and provider configuration. Swift only displays model status and keeps no model or key copy. |
+| Model tools | Interactive sessions register file, shell, network, background-browser, and available native-computer tools; analysis roles use no tools. Pi project configuration, extensions, skills, and tool settings are not loaded. |
+| Model credentials | The first valid local Pi discovery initializes an independent app snapshot of model settings and accounts; existing app values take precedence. Pi ModelRuntime resolves authentication and provider configuration. Swift only displays model status and keeps no model or key copy. |
 | Persisted content | Storage switches and basic credential redaction apply when saving state. They do not filter live model input/output or encrypt files. |
 | Proactive collection | `SystemContextCollector` asynchronously reads visible Accessibility text from the frontmost work window and Notification Center only when Accessibility is authorized, the session is unlocked, and the host has declared the source. It does not take screenshots, scan notification databases, or read files. |
 | Native notifications | `AssistantStore` uses a separate UserDefaults preference and macOS authorization. The app must be bundled, inactive, and unpaused when a new suggestion arrives. `tools.notifications` is not this switch. |

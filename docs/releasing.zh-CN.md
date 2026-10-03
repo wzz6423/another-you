@@ -12,7 +12,7 @@ Another You 当前为 **0.1.0 开发预览**，源码已公开。自动更新、
 make build-package
 ```
 
-[scripts/build-app.sh](../scripts/build-app.sh) 使用临时 scratch 目录以 release 模式构建 Swift 可执行文件，复制 sidecar 源码、锁定的 npm 生产依赖和 Sparkle 2.9.4，写入 `Info.plist`，进行 ad-hoc 签名并验证应用包；退出时清理临时构建目录。
+[scripts/build-app.sh](../scripts/build-app.sh) 使用临时 scratch 目录，默认以 Release 模式构建 Swift 可执行文件，复制 sidecar 源码、锁定的 npm 生产依赖和 Sparkle 2.9.4，写入 `Info.plist`，进行 ad-hoc 签名并验证应用包；退出时清理临时构建目录。
 
 构建使用 `DEVELOPER_DIR` 或 `xcode-select` 选定的完整 Xcode；版本过低或仅安装 Command Line Tools 时在编译前报错。可执行文件的 `LC_BUILD_VERSION` 记录所选 SDK，打包时会核对该字段与当前 SDK 一致。最低运行版本 macOS 14 与链接 SDK 版本分别记录。
 
@@ -23,6 +23,8 @@ OUTPUT_DIRECTORY="$PWD/dist/review-build" make build-package
 ```
 
 打包会使用官方 Node 发行包内的 npm 安装锁定的生产依赖，不读取个人 `.npmrc`，也不复制开发者配置、认证或浏览器资料。首次构建可能访问 Node、npm 与 Playwright 的公共下载源；开发类型检查和测试仍需先运行 `make deps`。
+
+`make build-package` 固定使用 Release 配置，但默认仍为 ad-hoc 签名且禁用在线更新；正式签名、更新元数据与归档见下方正式打包流程。直接调用脚本时可设置 `CONFIGURATION=debug` 或 `release`，默认 `release`。
 
 ## Node 与架构
 
@@ -55,15 +57,17 @@ OUTPUT_DIRECTORY="$PWD/dist/bundled-review" \
 | 命令 | 行为 |
 | --- | --- |
 | `make build` | 在 `macos/AnotherYou/.build` 生成 debug Swift 可执行文件，不生成 `.app`。 |
-| `make run` | 构建新应用，并在 `dist/dev/Another You.app` 启动本工作区管理的实例。 |
+| `make run` | 构建 Debug 应用，并在 `dist/dev/Another You.app` 启动本工作区管理的实例。 |
 | `make update` | 与 `make run` 相同，按本地代码重建/重启，不执行 Git fetch 或 pull。 |
 | `make stop` | 停止受管理的开发实例及其 sidecar。 |
-| `make build-package` | 生成独立应用包，不启动它。 |
+| `make build-package` | 以 Release 配置生成独立 `.app`，不启动它。 |
 | `make clean` | 停止受管理实例并删除已知构建/测试产物。 |
 
-`run` 与 `update` 使用固定开发目录，不受 `OUTPUT_DIRECTORY` 影响。新应用构建完成后，才停止旧的受管理实例。[dev-service.sh](../scripts/dev-service.sh) 记录 PID、进程启动时间和可执行命令，过期记录不会成为停止其他进程的依据。日志位于 `dist/dev/another-you.log`。
+`run` 与 `update` 固定使用 Debug 配置并关闭在线更新，使用固定开发目录，不受 `OUTPUT_DIRECTORY` 或 `CONFIGURATION` 影响。新应用构建完成后，才停止旧的受管理实例。[dev-service.sh](../scripts/dev-service.sh) 记录 PID、进程启动时间和可执行命令，过期记录不会成为停止其他进程的依据。日志位于 `dist/dev/another-you.log`。
 
-`make clean` 清理受管理应用/日志、默认 `dist/macos/Another You.app`、Swift `.build`、Agent coverage 与开发临时文件；保留 `agent-core/node_modules`、`agent-core/.cache/pi`、个人应用数据和自定义输出目录的应用包。自行创建的临时或自定义产物，检查后另行清理。
+Debug 应用在 macOS 中显示为 **Another You Debug**，Bundle ID 为 `com.anotheryou.mac.debug`，默认数据目录为 `~/Library/Application Support/AnotherYouDebug/`；Release 保持 `com.anotheryou.mac` 与 `AnotherYou/`。`ANOTHER_YOU_DATA_DIR` 仍优先于默认目录。两种配置都记录 `Info.plist` 中的 `AnotherYouBuildConfiguration`，`.app` 文件名保持 `Another You.app`。Debug 同时输出 `Another You.app.dSYM`，保留临时 scratch 清理后的行级调试信息；`update` 同步替换应用与符号，`clean` 一并清理。
+
+`make clean` 清理受管理应用/日志、默认 `dist/macos/Another You.app` 及其 `.dSYM`、Swift `.build`、Agent coverage 与开发临时文件；保留 `agent-core/node_modules`、`agent-core/.cache/pi`、个人应用数据和自定义输出目录的应用包。自行创建的临时或自定义产物，检查后另行清理。
 
 ## 验证
 

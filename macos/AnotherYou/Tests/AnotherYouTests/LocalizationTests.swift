@@ -126,6 +126,18 @@ final class LocalizationTests: XCTestCase {
         XCTAssertEqual(AppLocalization.message("Unrecognized external diagnostic"), "Unrecognized external diagnostic")
     }
 
+    func testAuthenticationPromptsUseInterfaceLanguageAndKeepProviderDetails() {
+        let chinese = Locale(identifier: "zh-Hans")
+        let english = Locale(identifier: "en")
+        XCTAssertEqual(AppLocalization.authenticationText("Enter Cloudflare account ID", locale: chinese), "输入 Cloudflare account ID")
+        XCTAssertEqual(AppLocalization.authenticationText("Sign in with ChatGPT", locale: chinese), "使用 ChatGPT 登录")
+        XCTAssertEqual(AppLocalization.authenticationText("Select Google Vertex AI authentication method:", locale: chinese), "选择登录方式")
+        XCTAssertEqual(AppLocalization.authenticationText("Browser login (default)", locale: chinese), "网页登录")
+        XCTAssertEqual(AppLocalization.authenticationText("Device code login (headless)", locale: chinese), "设备码登录")
+        XCTAssertEqual(AppLocalization.authenticationText("Enter OpenAI API key", locale: english), "Enter OpenAI API key")
+        XCTAssertEqual(AppLocalization.authenticationText("Unknown provider instructions", locale: chinese), "Unknown provider instructions")
+    }
+
     func testEnumLabelsUseExplicitInterfaceLocale() {
         let english = Locale(identifier: "en")
         let chinese = Locale(identifier: "zh-Hans")

@@ -99,6 +99,9 @@ class ReleaseTests(unittest.TestCase):
     def test_development_disables_updates_and_release_requires_metadata(self):
         with patch.dict(os.environ, {}, clear=True):
             settings = release.build_settings()
+            self.assertEqual(settings["AnotherYouBuildConfiguration"], "release")
+            self.assertEqual(settings["CFBundleIdentifier"], "com.anotheryou.mac")
+            self.assertEqual(settings["CFBundleDisplayName"], "Another You")
             self.assertIs(settings["AnotherYouUpdatesEnabled"], False)
             self.assertNotIn("SUFeedURL", settings)
         with patch.dict(os.environ, {"ANOTHER_YOU_UPDATES_ENABLED": "1"}, clear=True), self.assertRaises(ValueError):
@@ -109,6 +112,30 @@ class ReleaseTests(unittest.TestCase):
                 self.assertIs(settings[key], True)
             for key in ("SUEnableAutomaticChecks", "SUAutomaticallyUpdate"):
                 self.assertIs(settings[key], False)
+
+    def test_debug_bundle_has_separate_identity_and_disables_updates(self):
+        with patch.dict(os.environ, {"CONFIGURATION": "debug"}, clear=True):
+            settings = release.build_settings()
+        self.assertEqual(settings["AnotherYouBuildConfiguration"], "debug")
+        self.assertEqual(settings["CFBundleIdentifier"], "com.anotheryou.mac.debug")
+        self.assertEqual(settings["CFBundleName"], "Another You Debug")
+        self.assertEqual(settings["CFBundleDisplayName"], "Another You Debug")
+        self.assertIs(settings["AnotherYouUpdatesEnabled"], False)
+        self.assertNotIn("SUFeedURL", settings)
+
+    def test_debug_bundle_rejects_updates_and_invalid_configuration(self):
+        for environment in ({"CONFIGURATION": "debug", "ANOTHER_YOU_UPDATES_ENABLED": "1"}, {"CONFIGURATION": "invalid"}):
+            with self.subTest(environment=environment), patch.dict(os.environ, environment, clear=True), self.assertRaises(ValueError):
+                release.build_settings()
+
+    def test_package_forces_release_configuration(self):
+        resolved = release.resolved_config(self.config, "1.2.3", "arm64")
+        args = release.argparse.Namespace(output=str(self.root / "output"), version="1.2.3", build="7", arch="arm64")
+        with patch.dict(os.environ, {"CONFIGURATION": "debug"}), patch.object(release, "preflight", return_value=resolved), \
+             patch.object(release.subprocess, "run", side_effect=RuntimeError("stop before build")) as build:
+            with self.assertRaisesRegex(RuntimeError, "stop before build"):
+                release.package(args, self.config)
+        self.assertEqual(build.call_args.kwargs["env"]["CONFIGURATION"], "release")
 
     def test_bundle_preserves_sparkle_license_and_rejects_missing_license(self):
         app = self.root / "Another You.app"

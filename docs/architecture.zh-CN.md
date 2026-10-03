@@ -22,7 +22,7 @@ flowchart TD
     Core --> Pi[PiSdkBackend：工具禁用]
     Pi --> Fetch[受限 HTTP fetch]
     Fetch --> Model[本机或显式授权的模型服务]
-    Store --> Notifications[用户开启的 macOS 通知]
+    Store --> Notifications[经系统授权的 macOS 通知]
 ```
 
 [AgentClient.swift](../macos/AnotherYou/Sources/AnotherYouCore/AgentClient.swift) 负责进程启动、JSONL 分帧、解码与退出。[AssistantStore.swift](../macos/AnotherYou/Sources/AnotherYouCore/AssistantStore.swift) 根据真实事件更新卡片和活动，关联提问响应，并提供闲置测量；不会把发送命令视为执行完成。
@@ -44,8 +44,8 @@ flowchart TD
 | 边界 | 当前实现 |
 | --- | --- |
 | 模型网络 | `local` 只连接回环地址。非回环请求需要允许的隐私模式、显式网络授权、精确允许主机和 HTTPS；每次 fetch 拒绝重定向或离开配置来源。 |
-| 模型工具 | 交互会话注册文件、Shell、网络、后台浏览器及可用时的原生电脑工具；分析角色使用空工具列表。不加载用户 Pi 配置、扩展、技能或默认提供方凭据。 |
-| 模型凭据 | 由 Pi ModelRuntime 读取 Pi 认证和提供方配置，Swift 只显示模型状态，不维护密钥或模型副本。 |
+| 模型工具 | 交互会话注册文件、Shell、网络、后台浏览器及可用时的原生电脑工具；分析角色使用空工具列表。不加载 Pi 项目配置、扩展、技能或工具设置。 |
+| 模型凭据 | 首次发现有效本机 Pi 配置时初始化独立的应用模型和账户快照，应用已有值优先。由 Pi ModelRuntime 读取认证和提供方配置，Swift 只显示模型状态，不维护密钥或模型副本。 |
 | 持久化内容 | 状态保存时应用内容开关和基础凭据遮盖；它们不过滤实时模型输入/输出，也不加密文件。 |
 | 主动采集 | `SystemContextCollector` 在辅助功能授权、会话解锁且宿主声明来源时异步读取前台工作窗口及 Notification Center 可见文本；不截图、不读通知数据库、不读磁盘文件。 |
 | 原生通知 | `AssistantStore` 使用独立 UserDefaults 偏好和 macOS 授权；新建议到达时应用须为应用包、非活跃且未暂停。`tools.notifications` 不是这个开关。 |

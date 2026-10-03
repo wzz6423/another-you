@@ -26,13 +26,18 @@ struct ActivityLogView: View {
     private func activityLog(_ snapshot: ActivityHistory) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                HStack {
-                    Text(AppLocalization.text("活动记录")).font(.title2.bold())
-                    Spacer()
-                    Picker(AppLocalization.text("时间范围"), selection: $period) {
-                        ForEach(UsagePeriod.allCases) { Text($0.title(locale: interfaceLocale)).tag($0) }
-                    }.pickerStyle(.segmented).frame(maxWidth: 260)
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 16) {
+                        Text(AppLocalization.text("活动记录")).font(.title2.bold()).fixedSize()
+                        Spacer(minLength: 0)
+                        periodPicker
+                    }
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text(AppLocalization.text("活动记录")).font(.title2.bold())
+                        periodPicker
+                    }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
                 HStack {
                     Toggle(AppLocalization.text("按类型分组"), isOn: $grouped).toggleStyle(.checkbox).font(.caption)
                     Spacer()
@@ -52,8 +57,14 @@ struct ActivityLogView: View {
                         }
                     } else { ForEach(snapshot.events) { row($0) } }
                 }
-            }.padding(30).frame(maxWidth: 980).frame(maxWidth: .infinity, alignment: .topLeading)
+            }.padding(30).frame(maxWidth: 980, alignment: .leading).frame(maxWidth: .infinity, alignment: .topLeading)
         }.background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private var periodPicker: some View {
+        Picker(AppLocalization.text("时间范围"), selection: $period) {
+            ForEach(UsagePeriod.allCases) { Text($0.title(locale: interfaceLocale)).tag($0) }
+        }.pickerStyle(.segmented).fixedSize()
     }
 
     private func row(_ event: AgentEvent) -> some View {

@@ -4,6 +4,7 @@ import SwiftUI
 
 @MainActor
 public final class QuickChatController: ObservableObject {
+    private static let compactHeight: CGFloat = 72
     @Published private var focusRequest = UUID()
     private var panel: NSPanel?
     private weak var store: AssistantStore?
@@ -11,9 +12,9 @@ public final class QuickChatController: ObservableObject {
 
     public init() {}
 
-    public func configure(store: AssistantStore, onSettings: @escaping () -> Void) {
+    public func configure(store: AssistantStore) {
         guard panel == nil else { return }
-        let panel = InputPanel(contentRect: NSRect(x: 0, y: 0, width: 580, height: 100),
+        let panel = InputPanel(contentRect: NSRect(x: 0, y: 0, width: 580, height: Self.compactHeight),
                                styleMask: [.borderless], backing: .buffered, defer: false)
         panel.title = AppLocalization.text("Another You · 快速会话")
         panel.isOpaque = false
@@ -23,7 +24,7 @@ public final class QuickChatController: ObservableObject {
         panel.hidesOnDeactivate = false
         panel.level = .floating
         panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
-        panel.contentView = NSHostingView(rootView: QuickChatContent(controller: self, store: store, onSettings: onSettings))
+        panel.contentView = NSHostingView(rootView: QuickChatContent(controller: self, store: store))
         self.panel = panel
         self.store = store
         attachmentObservation = store.desktop.objectWillChange.sink { [weak self] in
@@ -39,8 +40,8 @@ public final class QuickChatController: ObservableObject {
             let frame = screen.frame
             let width = min(580, frame.width - 32)
             panel.setFrame(NSRect(x: frame.midX - width / 2,
-                                  y: frame.minY + frame.height * 0.2 - 50,
-                                  width: width, height: 100), display: true)
+                                  y: frame.minY + frame.height * 0.2 - Self.compactHeight / 2,
+                                  width: width, height: Self.compactHeight), display: true)
         }
         resizeForAttachments()
         panel.makeKeyAndOrderFront(nil)
@@ -50,7 +51,7 @@ public final class QuickChatController: ObservableObject {
 
     private func resizeForAttachments() {
         guard let panel, let desktop = store?.desktop else { return }
-        let height: CGFloat = desktop.attachments.isEmpty && desktop.error == nil ? 100 : 260
+        let height = Self.compactHeight + (desktop.attachments.isEmpty && desktop.error == nil ? 0 : 160)
         var frame = panel.frame
         frame.size.height = height
         panel.setFrame(frame, display: true)
@@ -59,6 +60,15 @@ public final class QuickChatController: ObservableObject {
     private final class InputPanel: NSPanel {
         override var canBecomeKey: Bool { true }
         override var canBecomeMain: Bool { false }
+
+        override func sendEvent(_ event: NSEvent) {
+            // 在文本编辑器或输入法消费 Esc 之前关闭浮窗。
+            if event.type == .keyDown, ShortcutAction.closeQuickChat.defaultHotKey.matches(event) {
+                orderOut(nil)
+                return
+            }
+            super.sendEvent(event)
+        }
     }
 
     private struct QuickChatContent: View {
@@ -69,14 +79,12 @@ public final class QuickChatController: ObservableObject {
         @ObservedObject private var draft: InputDraft
         @ObservedObject private var desktop: DesktopSession
         @ObservedObject private var updates: UpdateController
-        let onSettings: () -> Void
         private var prompt: String { draft.text }
         @FocusState private var inputFocused: Bool
 
-        init(controller: QuickChatController, store: AssistantStore, onSettings: @escaping () -> Void) {
+        init(controller: QuickChatController, store: AssistantStore) {
             self.controller = controller
             self.store = store
-            self.onSettings = onSettings
             draft = store.draft(for: .quickChat)
             desktop = store.desktop
             updates = store.updates
@@ -96,48 +104,79 @@ public final class QuickChatController: ObservableObject {
                 .onAppear { inputFocused = true }
                 .onChange(of: controller.focusRequest) { _, _ in inputFocused = true }
                 .background {
-                    Button(AppLocalization.text("关闭快速会话")) { controller.panel?.orderOut(nil) }
-                        .appShortcut(.closeQuickChat).hidden()
+                    if store.hasPendingPrompt {
+                        Button(AppLocalization.text("停止当前任务"), action: store.stopCurrentTask)
+                            .appShortcut(.stop).hidden()
+                    }
                 }
         }
 
-        @ViewBuilder
         private var glassInput: some View {
-            if #available(macOS 26.0, *) {
-                input.background { LiquidGlassInputBackground().allowsHitTesting(false) }
-                    .environment(\.colorScheme, .dark)
-            } else {
-                input.background(.ultraThinMaterial, in: Capsule())
-                    .overlay(Capsule().strokeBorder(.white.opacity(0.2), lineWidth: 0.5))
-            }
+            input
+                .background {
+                    ZStack {
+                        if #available(macOS 26.0, *) {
+                            LiquidGlassInputBackground()
+                        } else {
+                            FrostedInputBackground()
+                        }
+                        LinearGradient(stops: [
+                            .init(color: .black.opacity(0.82), location: 0),
+                            .init(color: .black.opacity(0.50), location: 0.35),
+                            .init(color: .black.opacity(0.14), location: 0.75),
+                            .init(color: .clear, location: 1)
+                        ], startPoint: .top, endPoint: .bottom)
+                    }
+                    .clipShape(Capsule())
+                    .allowsHitTesting(false)
+                }
+                .overlay(Capsule().strokeBorder(.white.opacity(0.2), lineWidth: 0.5).allowsHitTesting(false))
+                .environment(\.colorScheme, .dark)
+        }
+
+        private var canSend: Bool {
+            store.isConnected && store.modelConfigured && !store.hasPendingPrompt
+                && !updates.isInstalling && !store.isLoadingConversation
+                && (!prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !desktop.attachments.isEmpty)
         }
 
         private var input: some View {
             HStack(spacing: 12) {
-                TextField(AppLocalization.text("有什么想一起做的？"), text: Binding(get: { prompt }, set: { store.setInputDraft($0, for: .quickChat) }))
-                    .textFieldStyle(.plain).font(.system(size: 16))
+                TextField(AppLocalization.text("有什么想一起做的？"),
+                          text: Binding(get: { prompt }, set: { store.setInputDraft($0, for: .quickChat) }),
+                          prompt: Text(AppLocalization.text("有什么想一起做的？")).foregroundStyle(.white.opacity(0.65)))
+                    .textFieldStyle(.plain).font(.system(size: 14))
+                    .foregroundStyle(.white)
                     .focused($inputFocused)
                     .onSubmit(send)
                     .disabled(updates.isInstalling)
-                if store.hasPendingPrompt {
-                    Button(action: store.stopCurrentTask) { Image(systemName: "stop.fill") }
-                        .appShortcut(.stop).help(AppLocalization.text("停止当前任务"))
-                        .accessibilityLabel(AppLocalization.text("停止当前任务"))
-                } else if !store.modelConfigured || !store.isConnected {
-                    Button { controller.panel?.orderOut(nil); onSettings() } label: {
-                        Image(systemName: "slider.horizontal.3")
+                HStack(spacing: 8) {
+                    Button { controller.panel?.orderOut(nil) } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .frame(width: 28, height: 28)
+                            .background(.red, in: Circle())
                     }
-                    .help(AppLocalization.text("连接模型")).accessibilityLabel(AppLocalization.text("连接模型"))
-                } else {
-                    Button(action: send) { Image(systemName: "arrow.up").foregroundStyle(.blue) }
-                        .appShortcut(.sendMessage).help(AppLocalization.text("发送"))
-                        .accessibilityLabel(AppLocalization.text("发送"))
-                        .disabled(updates.isInstalling || store.isLoadingConversation || (prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && desktop.attachments.isEmpty))
+                    .appShortcut(.closeQuickChat).help(AppLocalization.text("关闭快速会话"))
+                    .accessibilityLabel(AppLocalization.text("关闭快速会话"))
+                    Button(action: send) {
+                        Image(systemName: "play.fill")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .frame(width: 28, height: 28)
+                            .background(.blue, in: Circle())
+                    }
+                    .appShortcut(.sendMessage).help(AppLocalization.text("发送"))
+                    .accessibilityLabel(AppLocalization.text("发送"))
+                    .disabled(!canSend)
+                    .opacity(canSend ? 1 : 0.45)
                 }
             }
             .buttonStyle(.plain)
-            .padding(.horizontal, 22)
-            .frame(height: 64)
+            .padding(.leading, 18)
+            .padding(.trailing, 10)
+            .frame(height: 44)
         }
 
         private func send() {
@@ -153,23 +192,31 @@ public final class QuickChatController: ObservableObject {
 private struct LiquidGlassInputBackground: NSViewRepresentable {
     func makeNSView(context: Context) -> NSGlassEffectView {
         let view = NSGlassEffectView()
-        // 与 Zisla 一致：透明内容层让原生玻璃启用完整合成，避免只显示边缘。
+        // 透明内容层触发完整玻璃合成，避免只渲染边缘。
         let host = NSView(frame: view.bounds)
         host.autoresizingMask = [.width, .height]
         host.wantsLayer = true
         host.layer?.backgroundColor = NSColor.clear.cgColor
         view.contentView = host
-        configure(view)
+        view.style = .clear
+        view.tintColor = nil
+        view.cornerRadius = 22
+        view.appearance = NSAppearance(named: .darkAqua)
         return view
     }
 
-    func updateNSView(_ view: NSGlassEffectView, context: Context) {
-        configure(view)
+    func updateNSView(_ view: NSGlassEffectView, context: Context) {}
+}
+
+private struct FrostedInputBackground: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let view = NSVisualEffectView()
+        view.material = .hudWindow
+        view.blendingMode = .behindWindow
+        view.state = .active
+        view.appearance = NSAppearance(named: .darkAqua)
+        return view
     }
 
-    private func configure(_ view: NSGlassEffectView) {
-        view.style = .clear
-        view.tintColor = nil
-        view.cornerRadius = 32
-    }
+    func updateNSView(_ view: NSVisualEffectView, context: Context) {}
 }

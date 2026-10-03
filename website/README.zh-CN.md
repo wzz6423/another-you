@@ -28,7 +28,8 @@ python3 -m http.server 4173 --bind 127.0.0.1 --directory website
 | [styles.css](styles.css) | 布局、字体、响应式样式与减少动态效果 |
 | [locales.js](locales.js)、[i18n.js](i18n.js) | 翻译词典、语言解析、元数据与 RTL |
 | [script.js](script.js) | 场景选择、演示决定、重置和复制 |
-| [mark.svg](mark.svg) | 项目标志 |
+| [logo-light.png](logo-light.png)、[logo-dark.png](logo-dark.png) | 已选定的日夜标志，分别用于浅色和深色区域 |
+| [favicon-light.png](favicon-light.png)、[favicon-dark.png](favicon-dark.png)、[apple-touch-icon.png](apple-touch-icon.png) | 随系统外观切换的浏览器图标及 Apple 触屏图标 |
 
 演示包含时间、事件与闲置三种场景。点击标签或使用方向键、Home、End 可切换场景。每个场景分别在页面内存中保留生成草稿/稍后/忽略的选择，并可独立重置；刷新页面后清空。
 

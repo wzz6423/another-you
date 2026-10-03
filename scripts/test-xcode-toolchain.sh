@@ -39,6 +39,7 @@ expect_rejection() {
 mkdir -p "${test_dir}/bin" "$(dirname -- "$fixture_swift")" "$fixture_sdk" "${workspace}/scripts"
 cp "${repo_dir}/Makefile" "$workspace/"
 cp "${repo_dir}/scripts/xcode-toolchain.sh" "${workspace}/scripts/"
+cp "${repo_dir}/scripts/run-isolated-tests.sh" "${workspace}/scripts/"
 cat > "${test_dir}/bin/xcode-select" <<'SELECT'
 #!/usr/bin/env bash
 set -euo pipefail
