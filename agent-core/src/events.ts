@@ -19,6 +19,8 @@ export type AgentEventKind =
   | "model.catalog"
   | "model.operation"
   | "model.auth"
+  | "model.credential"
+  | "localModel.operation"
   | "proposal.updated"
   | "agent.error";
 

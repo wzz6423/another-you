@@ -71,19 +71,33 @@ test("归档、分支和删除不复制或删除已发生的统计", async t => 
   assert.equal(records(restored).length, 1);
 });
 
-test("统计保留186天边界，独立于30天用量与活动历史", async t => {
+test("用量与次数统计保留186天边界，活动历史只保留30天", async t => {
   const f = await fixture(t);
   await f.core.prompt("first", "test");
   const original = records(f.core)[0];
-  f.advance(90 * 86400_000);
+  const historyIDs = (f.core.status().history as AgentEvent[])
+    .filter(event => event.occurredAt === original.occurredAt).map(event => event.id);
+  assert.ok(historyIDs.length > 0);
+  f.advance(30 * 86400_000);
+  assert.ok((f.core.status().history as AgentEvent[]).some(event => historyIDs.includes(event.id)));
+  f.advance(1);
+  assert.equal((f.core.status().history as AgentEvent[]).some(event => historyIDs.includes(event.id)), false);
+  f.advance(60 * 86400_000 - 1);
   const restored = new AgentCore({ config: f.config, backend: f.backend, now: f.clock, rules: [] });
   assert.equal(records(restored).length, 1);
-  assert.equal((restored.status().usageRecords as unknown[]).length, 0);
+  assert.equal((restored.status().usageRecords as unknown[]).length, 1);
+  assert.equal((restored.status().history as AgentEvent[]).some(event => historyIDs.includes(event.id)), false);
   const boundary = new Date(Date.parse(original.occurredAt) + ACTIVITY_RETENTION_MS);
   const invalid = { ...original, id: "bad", occurredAt: "invalid" };
   const future = { ...original, id: "future", occurredAt: new Date(boundary.getTime() + 1).toISOString() };
   assert.deepEqual(retainedActivity([original, original, invalid, future], boundary), [original]);
   assert.equal(retainedActivity([original], new Date(boundary.getTime() + 1)).length, 0);
+  f.advance(96 * 86400_000);
+  assert.equal(records(restored).length, 1);
+  assert.equal((restored.status().usageRecords as unknown[]).length, 1);
+  f.advance(1);
+  assert.equal(records(restored).length, 0);
+  assert.equal((restored.status().usageRecords as unknown[]).length, 0);
 });
 
 test("旧状态只从真实历史事件迁移，去重并跳过再次提醒与未来日期", async t => {

@@ -22,19 +22,23 @@
 
 ## 截图与应用上下文
 
+快速会话在唤起时、浮窗取得焦点前保存应用快照，包括应用身份、原窗口编号、文字、控件树与窗口画面。默认读取这份初始快照，输入期间或提交后切换应用、窗口、工作区不会改变它。需要补读时可在后台刷新原应用的原窗口；不会跟随新的前台应用，也不会选取原应用的其他窗口。原窗口关闭、应用重启或目标引用失效会明确报错。没有可定位窗口的桌面只保存初始屏幕画面，不能在后台重新截取用户当前桌面。关闭输入框会释放未发送快照，再次唤起会重新采集；主会话的普通发送继续使用实时读取。
+
 通过全局快捷键附加应用或屏幕快照：Control+Option 捕获前台应用窗口，区域与屏幕快捷键捕获各自的目标。快捷键在打开快速会话前记录目标应用，并在输入区显示可移除的附件预览。区域截图需要用户实际选择，Esc 取消；屏幕和窗口截图使用 ScreenCaptureKit。
 
-在 **设置 → 电脑操作** 授予 macOS 屏幕录制权限。辅助功能权限用于读取目标应用的窗口标题、文本与可操作控件；未授权时只有应用基础信息，部分应用不会暴露完整上下文。权限不足会显示错误，不绕过 macOS 授权。
+在 **设置 → 电脑操作** 的 **电脑操作** 分组授予 macOS 屏幕录制权限。辅助功能权限用于读取目标应用的窗口标题、文本与可操作控件；未授权时只有应用基础信息，部分应用不会暴露完整上下文。权限不足会显示错误，不绕过 macOS 授权。
 
 截图先进入快速会话或主会话输入区的可移除预览附件，点击发送后才随消息提交给当前配置的模型；最多四张，JPEG 最长边 1600 像素、每张原始数据不超过 450KB。截图和原始上下文不写入活动记录/状态文件；仅应用名称可按内容保存偏好用于会话分组。模型的文字回复仍按既有内容保存设置处理。使用远程模型时，已发送截图和上下文会传给该模型服务；需要支持图片的模型，纯文本模型可能报错。
 
 ## 后台浏览器与电脑操作
 
+电脑操作能力包括默认启用的 **电脑操作（Computer use，`computer_use`）** 和 **浏览器操作（Browser use，`browser_use`）**。**设置 → 电脑操作** 提供屏幕录制与辅助功能授权；浏览器没有独立开关或可配置项，因此不单独展示说明分组。
+
 完整应用的 `browser_use` 使用随包的 Chromium Headless Shell，无头运行，不操作用户日常浏览器窗口，也不要求用户安装 Chrome 或 Edge。构建时下载并校验浏览器，运行时不下载。源码运行或 `BUNDLE_NODE=0` 开发包才使用已安装的 Chrome、Chromium、Edge，或 `ANOTHER_YOU_BROWSER_EXECUTABLE` 指定的可执行文件。
 
 浏览器支持标签页、导航、网页文本及元素快照、点击、填表、按键、下拉选择、滚动和截图，包含跨源 iframe 与开放 Shadow DOM。每次操作返回新的元素引用；旧引用拒绝使用。封闭 Shadow DOM、验证码和站点反自动化机制可能使操作不可用。
 
-浏览器登录保存在应用数据目录下的 `browser-profile`，与用户 Chrome 的个人资料分开，可能需要单独登录。并行工具请求串行执行，默认每次操作限时 30 秒；取消会关闭浏览器并使已排队操作失效，下次请求可以重新启动。图片截图以内存形式提交模型，不写文件。
+浏览器按会话隔离，登录保存在应用数据目录下的 `browser-sessions/<会话 ID 的 SHA-256>/browser-profile`；默认会话沿用 `browser-profile`。这些资料与用户 Chrome 的个人资料分开，可能需要单独登录。同一会话的浏览器工具请求串行执行，默认每次操作限时 30 秒；取消只关闭该会话的浏览器并使其已排队操作失效，其他会话继续运行，下次请求可以重新启动。图片截图以内存形式提交模型，不写文件。
 
 `computer_use` 经 Swift 宿主执行。默认后台，只通过辅助功能接口按快照引用执行按下控件、设置值和滚动，不主动激活应用或模拟全局输入。不支持的动作会明确报错；目标应用自身的行为仍可能打开窗口，因此不能保证所有原生应用完全无感。
 
@@ -42,9 +46,9 @@
 
 ## 协议与开发验证
 
-`prompt` 可携带 `attachments: [{data, mimeType, context?}]` 和 `allowForeground`。图片仅接受 PNG/JPEG、总 base64 不超过 3,000,000 字符；JSONL 单行最大 4,000,000 字符。宿主启动 sidecar 时设置 `ANOTHER_YOU_DESKTOP_HOST=1`，才注册 `computer_use`。
+`prompt` 可携带 `attachments: [{data, mimeType, context?}]` 和 `allowForeground`。快速会话另携带 `desktopSnapshot: {capturedAt, context, contextError?, image?: {data, mimeType}, mode?, screenshotError?}`，其中 `context` 包含 `pid`、`targetId`、可用时的 `windowId` 与 AX 控件树；采集失败仍提供快照对象，防止回退实时读取。快照只供本轮模型工具使用，不保存到后续对话。`computer_use` 的 `snapshot` 返回文字与画面组成的完整应用快照，`context`/`screenshot` 分别返回文字和画面；默认读取初始内容，`refresh: true` 经宿主后台补读原窗口，截图固定为窗口模式，返回 `frozen: false` 与 `invocationCapturedAt`。刷新后的控件引用替换该目标的旧引用，其他会话的目标不受影响。写操作省略 `pid` 时固定到唤起时的应用，并携带原目标引用。没有原生宿主时可读取已有快照，刷新与电脑操作仍要求连接宿主。图片仅接受 PNG/JPEG，附件总 base64 不超过 3,000,000 字符；JSONL 单行最大 4,000,000 字符。宿主启动 sidecar 时设置 `ANOTHER_YOU_DESKTOP_HOST=1`，启用原生 `computer_use` 操作。
 
-sidecar 发出临时事件 `desktop.request`（`requestId`、`arguments`），宿主以 `desktopResult` 命令返回 `result` 或 `error`。`desktop.cancel` 取消同 ID 操作，迟到回执忽略。这些事件不经过持久化活动总线。`cancel` 命令停止当前模型与工具；单次模型 HTTP 请求最长 60 秒，整个工具循环最长 180 秒。
+sidecar 发出临时事件 `desktop.request`（`requestId`、`arguments`），宿主以 `desktopResult` 命令返回 `result` 或 `error`。`desktop.cancel` 取消同 ID 操作，迟到回执忽略。这些事件不经过持久化活动总线。`cancel` 携带 `conversationId` 时只停止该会话的模型与工具，省略时停止全部活动请求；单次模型 HTTP 请求最长 60 秒，整个工具循环最长 180 秒。
 
 - `npm test --prefix agent-core`：真实无头 Chrome 与本地 HTTP 页面、Pi 图片/电脑回执、取消和状态持久化边界。
 - `swift test --package-path macos/AnotherYou`：快捷键注册/冲突/录制状态、AX 权限和过期控件、截图压缩、超时与取消。

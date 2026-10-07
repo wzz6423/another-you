@@ -118,7 +118,9 @@ public struct ProactiveCard: Identifiable, Equatable, Sendable {
     public var text: String?
     public var snoozedUntil: Date?
     public var archived: Bool
+    public var pinned: Bool
     public var appName: String?
+    public var usesLocalModel = false
 
     init?(payload: [String: JSONValue], event: AgentEvent? = nil) {
         guard let id = payload["suggestionId"]?.string ?? payload["id"]?.string ?? event?.id,
@@ -134,7 +136,9 @@ public struct ProactiveCard: Identifiable, Equatable, Sendable {
         text = payload["text"]?.string
         snoozedUntil = AgentEvent.date(from: payload["snoozedUntil"]?.string)
         archived = payload["archived"]?.bool ?? false
+        pinned = payload["pinned"]?.bool ?? false
         appName = payload["context"]?.object?["appName"]?.string
+        usesLocalModel = payload["context"]?.object?["executionRoute"]?.string == "local"
     }
 
     private static func reason(for trigger: String?) -> String {
@@ -178,12 +182,26 @@ public struct ConversationSession: Identifiable, Equatable, Sendable {
     public let id: String
     public let title: String
     public let appName: String?
-    public let updatedAt: Date
+    public var updatedAt: Date
     public let createdAt: Date
     public let forkedFrom: ConversationForkOrigin?
-    public let state: String
+    public var state: String
     public let archived: Bool
+    public let pinned: Bool
     public var messages: [ConversationMessage]
+
+    init(id: String, prompt: String, appName: String?, messages: [ConversationMessage]) {
+        self.id = id
+        title = String(prompt.prefix(100))
+        self.appName = appName
+        createdAt = Date()
+        updatedAt = createdAt
+        forkedFrom = nil
+        state = "running"
+        archived = false
+        pinned = false
+        self.messages = messages
+    }
 
     init?(payload: [String: JSONValue]) {
         guard let id = payload["id"]?.string, let title = payload["title"]?.string else { return nil }
@@ -198,6 +216,7 @@ public struct ConversationSession: Identifiable, Equatable, Sendable {
         } else { forkedFrom = nil }
         state = payload["state"]?.string ?? "failed"
         archived = payload["archived"]?.bool ?? false
+        pinned = payload["pinned"]?.bool ?? false
         messages = (payload["messages"]?.array ?? []).compactMap { value in
             guard let item = value.object, let id = item["id"]?.string, let prompt = item["prompt"]?.string else { return nil }
             return ConversationMessage(id: id, prompt: prompt, response: item["response"]?.string, error: item["error"]?.string)

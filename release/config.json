@@ -6,5 +6,5 @@
   "feedURLTemplate": "https://github.com/wzz6423/another-you/releases/latest/download/appcast-{arch}.xml",
   "fallbackFeedURLTemplate": "https://gitee.com/wzz6423/another-you/releases/download/update-release/appcast-{arch}.xml",
   "fallbackDownloadURLTemplate": "https://gitee.com/wzz6423/another-you/releases/download/v{version}/{filename}",
-  "publicEDKey": null
+  "publicEDKey": "FIIhP9d0F/sCV2coRPx8IlALbnMt9np8oXQYiiHgK60="
 }

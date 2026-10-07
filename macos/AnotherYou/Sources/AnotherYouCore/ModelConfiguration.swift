@@ -34,6 +34,7 @@ public struct PiProviderOption: Codable, Equatable, Identifiable, Sendable {
     public let credentialType: String?
     public let authMethods: [AuthMethod]
     public let configurationIssue: String?
+    public var accountId: String? = nil
     public var apiConfiguration: APIConfiguration? = nil
 }
 
@@ -65,9 +66,18 @@ public struct PiModelSelection: Codable, Equatable, Sendable {
     public var id: String { provider + "/" + model }
 }
 
+public struct PiModelAccount: Codable, Equatable, Identifiable, Sendable {
+    public let id: String
+    public let provider: String
+    public let name: String
+    public let hasAPIKey: Bool
+    public let credentialType: String?
+}
+
 public struct PiModelCatalog: Codable, Equatable, Sendable {
     public var models: [PiModelOption] = []
     public var providers: [PiProviderOption] = []
+    public var accounts: [PiModelAccount]?
     public var selected: PiModelSelection?
     public var message: String?
 
@@ -143,7 +153,20 @@ public struct PiAuthentication: Equatable, Sendable {
 @MainActor
 public final class ModelConfigurationSession: ObservableObject {
     static let customProviderID = "__custom_api__"
-    @Published var accountProviderID = ""
+    @Published var accountProviderID = "" {
+        didSet {
+            guard oldValue != accountProviderID else { return }
+            clearAPIKey()
+            isNewAccount = false
+            accountName = ""
+            apiDraftProviderID = nil
+        }
+    }
+    @Published var accountName = ""
+    @Published private(set) var isNewAccount = false
+    @Published private(set) var isAPIKeyVisible = false
+    @Published private(set) var revealedAPIKey = ""
+    private var credentialRequest: (id: String, accountID: String)?
     @Published public private(set) var catalog = PiModelCatalog()
     @Published public private(set) var isLoading = false
     @Published public private(set) var activeOperation: String?
@@ -186,7 +209,7 @@ public final class ModelConfigurationSession: ObservableObject {
         authentication = nil
         isSubmittingAuthentication = false
         authenticationInput = ""
-        apiConfigurationDraft.apiKey = ""
+        clearAPIKey()
         openedAuthenticationURLs.removeAll()
         catalogRequestID = nil
         isLoading = false
@@ -224,11 +247,11 @@ public final class ModelConfigurationSession: ObservableObject {
     }
 
     public func select(_ model: PiModelOption, thinkingLevel: String) {
-        begin("modelSelect", fields: ["provider": .string(model.provider), "model": .string(model.modelID), "thinkingLevel": .string(thinkingLevel)])
+        begin("modelSelect", fields: ["provider": .string(model.provider), "model": .string(model.modelID), "thinkingLevel": .string(thinkingLevel)].merging(accountFields) { value, _ in value })
     }
 
     public func login(provider: String, type: String) {
-        begin("modelLogin", fields: ["provider": .string(provider), "authType": .string(type)])
+        begin("modelLogin", fields: ["provider": .string(provider), "authType": .string(type)].merging(accountFields) { value, _ in value })
     }
 
     func synchronizeProvider(preferSavedSelection: Bool = false) {
@@ -240,8 +263,13 @@ public final class ModelConfigurationSession: ObservableObject {
     }
 
     func prepareAPIConfiguration(provider: String?) {
-        let id = provider ?? ""
+        let id = (provider ?? "") + "/" + (isNewAccount ? "new" : activeAccountID ?? "")
         if apiDraftProviderID == id, apiConfigurationDraft != apiDraftBaseline { return }
+        if apiDraftProviderID != id {
+            clearAPIKey()
+            if !isNewAccount { accountName = currentAccount?.name ?? "" }
+        }
+        apiDraftProviderID = id
         if let provider {
             guard let configuration = catalog.providers.first(where: { $0.id == provider })?.apiConfiguration else { return }
             apiConfigurationDraft = PiAPIConfigurationDraft(provider: provider, baseUrl: configuration.baseUrl,
@@ -258,7 +286,9 @@ public final class ModelConfigurationSession: ObservableObject {
     }
 
     var hasSavedAPIKey: Bool {
-        catalog.providers.contains { $0.id == apiConfigurationDraft.provider && $0.credentialType == "api_key" && $0.configured }
+        guard !isNewAccount else { return false }
+        if let currentAccount { return currentAccount.hasAPIKey }
+        return catalog.providers.contains { $0.id == apiConfigurationDraft.provider && $0.credentialType == "api_key" && $0.configured }
     }
 
     func configureAPI(thinkingLevel: String) {
@@ -270,15 +300,84 @@ public final class ModelConfigurationSession: ObservableObject {
             "thinkingLevel": .string(thinkingLevel)]
         let key = draft.apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         if !key.isEmpty { fields["apiKey"] = .string(key) }
-        begin("modelConfigure", fields: fields)
+        begin("modelConfigure", fields: fields.merging(accountFields) { value, _ in value })
+    }
+
+    var providerAccounts: [PiModelAccount] { (catalog.accounts ?? []).filter { $0.provider == accountProviderID } }
+    var activeAccountID: String? { catalog.providers.first { $0.id == accountProviderID }?.accountId }
+    var currentAccount: PiModelAccount? { providerAccounts.first { $0.id == activeAccountID } }
+    var accountSelection: String { isNewAccount ? "" : activeAccountID ?? "" }
+    private var accountFields: [String: JSONValue] {
+        var fields: [String: JSONValue] = [:]
+        if isNewAccount { fields["newAccount"] = .bool(true) }
+        else if let id = activeAccountID { fields["accountId"] = .string(id) }
+        let name = accountName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !name.isEmpty { fields["accountName"] = .string(name) }
+        return fields
+    }
+
+    func newAccount() {
+        guard canChange else { return }
+        clearAPIKey()
+        isNewAccount = true
+        accountName = ""
+        apiDraftProviderID = nil
+        prepareAPIConfiguration(provider: accountProviderID == Self.customProviderID ? nil : accountProviderID)
+    }
+
+    func selectAccount(_ id: String) {
+        guard canChange else { return }
+        if id.isEmpty { newAccount(); return }
+        clearAPIKey()
+        if id == activeAccountID {
+            isNewAccount = false
+            apiDraftProviderID = nil
+            prepareAPIConfiguration(provider: accountProviderID)
+        } else { begin("modelAccountSelect", fields: ["accountId": .string(id)]) }
+    }
+
+    private func hideAPIKey() {
+        credentialRequest = nil
+        revealedAPIKey = ""
+        isAPIKeyVisible = false
+    }
+
+    func clearAPIKey() {
+        hideAPIKey()
+        apiConfigurationDraft.apiKey = ""
+    }
+
+    func editAPIKey(_ value: String) {
+        credentialRequest = nil
+        revealedAPIKey = ""
+        apiConfigurationDraft.apiKey = value
+    }
+
+    func toggleAPIKeyVisibility() {
+        if isAPIKeyVisible {
+            isAPIKeyVisible = false
+            revealedAPIKey = ""
+            credentialRequest = nil
+            return
+        }
+        isAPIKeyVisible = true
+        guard apiConfigurationDraft.apiKey.isEmpty, hasSavedAPIKey, let accountID = activeAccountID, isConnected else { return }
+        let id = UUID().uuidString
+        credentialRequest = (id, accountID)
+        if !sendCommand(["op": .string("modelCredentialRead"), "requestId": .string(id), "accountId": .string(accountID)]) {
+            credentialRequest = nil
+            isAPIKeyVisible = false
+            message = "无法读取 API Key"
+        }
     }
 
     public func logout(provider: String) { begin("modelLogout", fields: ["provider": .string(provider)]) }
 
-    public func importConfiguration(from url: URL) { begin("modelImport", fields: ["path": .string(url.path)]) }
+    public func importConfiguration() { begin("modelImport", fields: [:]) }
 
     private func begin(_ operation: String, fields: [String: JSONValue]) {
         guard canChange, canStartOperation() else { return }
+        hideAPIKey()
         let id = UUID().uuidString
         activeOperation = operation
         activeRequestID = id
@@ -325,6 +424,7 @@ public final class ModelConfigurationSession: ObservableObject {
     func consume(_ event: AgentEvent) -> Bool {
         let payload = event.payload
         if event.kind == "agent.error", let id = payload["requestId"]?.string {
+            if id == credentialRequest?.id { hideAPIKey(); message = "无法读取 API Key"; return true }
             if id == activeRequestID { failAuthentication(); return true }
             if id == catalogRequestID {
                 isLoading = false
@@ -335,15 +435,33 @@ public final class ModelConfigurationSession: ObservableObject {
         }
         guard event.kind.hasPrefix("model.") else { return false }
         switch event.kind {
+        case "model.credential":
+            guard let request = credentialRequest, isConnected, isAPIKeyVisible, !isNewAccount,
+                  payload["requestId"]?.string == request.id, payload["accountId"]?.string == request.accountID,
+                  activeAccountID == request.accountID, apiConfigurationDraft.apiKey.isEmpty else { return true }
+            credentialRequest = nil
+            revealedAPIKey = payload["apiKey"]?.string ?? ""
         case "model.catalog":
             if let snapshot: PiModelCatalog = decode(payload) {
+                let previousAccount = activeAccountID
                 if catalog != snapshot { catalog = snapshot }
+                if previousAccount != activeAccountID {
+                    clearAPIKey()
+                    isNewAccount = false
+                    apiDraftProviderID = nil
+                }
                 if payload["requestId"]?.string == catalogRequestID { isLoading = false; catalogRequestID = nil }
             } else {
                 isLoading = false
                 message = "模型目录格式无效"
             }
         case "model.operation":
+            if payload["requestId"]?.string == credentialRequest?.id, payload["state"]?.string == "failed" {
+                credentialRequest = nil
+                isAPIKeyVisible = false
+                message = payload["message"]?.string
+                return true
+            }
             if payload["requestId"]?.string == catalogRequestID, payload["state"]?.string == "failed" {
                 isLoading = false
                 catalogRequestID = nil
@@ -362,7 +480,8 @@ public final class ModelConfigurationSession: ObservableObject {
             if ["succeeded", "failed", "cancelled"].contains(payload["state"]?.string ?? ""),
                payload["operation"]?.string == activeOperation {
                 if activeOperation == "modelConfigure", payload["state"]?.string == "succeeded" {
-                    apiConfigurationDraft.apiKey = ""
+                    clearAPIKey()
+                    isNewAccount = false
                     apiDraftBaseline = apiConfigurationDraft
                 }
                 if payload["state"]?.string == "cancelled" { message = nil }

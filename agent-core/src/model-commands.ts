@@ -19,6 +19,9 @@ export interface ModelCommand {
   baseUrl?: string;
   api?: string;
   apiKey?: string;
+  accountId?: string;
+  accountName?: string;
+  newAccount?: boolean;
 }
 
 interface PendingPrompt {
@@ -28,7 +31,8 @@ interface PendingPrompt {
   resolve(value: string): void;
 }
 
-const OPERATIONS = new Set(["modelCatalog", "modelSelect", "modelConfigure", "modelTest", "modelLogin", "modelLogout", "modelImport", "modelAuthReply", "modelAuthCancel"]);
+const OPERATIONS = new Set(["modelCatalog", "modelSelect", "modelConfigure", "modelTest", "modelLogin", "modelLogout", "modelImport", "modelAuthReply", "modelAuthCancel",
+  "modelAccountSelect", "modelAccountDelete", "modelCredentialRead"]);
 const REQUIRED_TEXT_PROMPTS = new Set([
   "Enter Cloudflare account ID", "Enter Cloudflare AI Gateway ID", "Enter AWS profile name",
   "Enter Google Cloud project ID", "Enter Google Cloud location", "Enter service account credentials file path",
@@ -71,6 +75,10 @@ export class ModelCommandHandler {
         this.active.abort.abort();
       } else if (command.op === "modelCatalog" && command.refresh !== true) {
         this.catalog(requestId);
+      } else if (command.op === "modelCredentialRead") {
+        const accountId = required(command.accountId, "accountId");
+        const apiKey = this.backend.modelConfiguration.readAPIKey(accountId);
+        this.emit(createAgentEvent({ kind: "model.credential", source: "system", payload: { requestId, accountId, apiKey } }));
       } else {
         if (this.active || this.backend.isBusy) throw new Error("模型正在处理请求，请完成或取消后再修改配置");
         const abort = new AbortController();
@@ -102,9 +110,9 @@ export class ModelCommandHandler {
         if (command.op === "modelConfigure") {
           await configuration.configureAPI({ provider: required(command.provider, "provider"), baseUrl: required(command.baseUrl, "baseUrl"),
             api: required(command.api, "api"), model: required(command.model, "model"), apiKey: command.apiKey,
-            thinkingLevel: command.thinkingLevel }, abort.signal);
+            thinkingLevel: command.thinkingLevel, accountId: command.accountId, accountName: command.accountName, newAccount: command.newAccount }, abort.signal);
         } else if (command.op === "modelSelect") {
-          await configuration.select(required(command.provider, "provider"), required(command.model, "model"), command.thinkingLevel);
+          await configuration.select(required(command.provider, "provider"), required(command.model, "model"), command.thinkingLevel, command.accountName);
         } else if (command.op === "modelLogin") {
           if (command.authType !== "api_key" && command.authType !== "oauth") throw new Error("请选择有效登录方式");
           const provider = required(command.provider, "provider");
@@ -113,11 +121,15 @@ export class ModelCommandHandler {
             prompt: prompt => this.requestPrompt(requestId, provider, prompt, abort.signal),
             notify: event => this.notify(requestId, provider, event),
           };
-          await configuration.login(provider, command.authType, interaction);
+          await configuration.login(provider, command.authType, interaction, { accountId: command.accountId, accountName: command.accountName, newAccount: command.newAccount });
         } else if (command.op === "modelLogout") {
-          await configuration.logout(required(command.provider, "provider"));
+          await configuration.logout(required(command.provider, "provider"), command.accountId);
+        } else if (command.op === "modelAccountSelect") {
+          await configuration.selectAccount(required(command.accountId, "accountId"), abort.signal);
+        } else if (command.op === "modelAccountDelete") {
+          await configuration.deleteAccount(required(command.accountId, "accountId"), abort.signal);
         } else if (command.op === "modelImport") {
-          await configuration.importConfiguration(required(command.path, "path"));
+          await configuration.importConfiguration(command.path === undefined ? undefined : required(command.path, "path"));
         } else if (command.op === "modelCatalog") {
           await configuration.refreshCatalog(abort.signal);
         }
@@ -125,6 +137,7 @@ export class ModelCommandHandler {
       this.operation(command, "succeeded", command.op === "modelImport"
         ? "模型配置已导入，认证信息未复制"
         : command.op === "modelLogout" ? "账户已注销"
+        : command.op === "modelAccountDelete" ? "账户已删除"
         : command.op === "modelLogin" ? this.backend.modelConfiguration.snapshot.providers.find(provider => provider.id === command.provider)?.configured
           ? "账户已保存，请选择模型" : "账户信息已保存，但凭据尚不可用，请检查配置或更换登录方式"
         : command.op === "modelCatalog" ? "模型目录已更新" : this.backend.modelConfiguration.message);
@@ -183,7 +196,7 @@ export class ModelCommandHandler {
   private safeError(error: unknown): string {
     let message = error instanceof Error ? error.message : "模型配置操作失败";
     for (const secret of this.secrets) if (secret) message = message.split(secret).join("[已隐藏]");
-    return redactSecrets(message).slice(0, 500);
+    return redactSecrets(this.backend.modelConfiguration.redactSecrets(message)).slice(0, 500);
   }
 
   async close(): Promise<void> {

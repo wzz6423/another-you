@@ -9,6 +9,10 @@ public final class QuickChatController: ObservableObject {
     private var panel: NSPanel?
     private weak var store: AssistantStore?
     private var attachmentObservation: AnyCancellable?
+    @Published private(set) var desktopSnapshot: [String: JSONValue]?
+    private(set) var conversationID: String?
+    private var snapshotTask: Task<[String: JSONValue], Never>?
+    private var showTask: Task<Void, Never>?
 
     public init() {}
 
@@ -24,6 +28,7 @@ public final class QuickChatController: ObservableObject {
         panel.hidesOnDeactivate = false
         panel.level = .floating
         panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
+        panel.onClose = { [weak self] in self?.close() }
         panel.contentView = NSHostingView(rootView: QuickChatContent(controller: self, store: store))
         self.panel = panel
         self.store = store
@@ -33,7 +38,8 @@ public final class QuickChatController: ObservableObject {
     }
 
     public func show() {
-        guard let panel else { return }
+        guard let panel, let store else { return }
+        close()
         panel.title = AppLocalization.text("Another You · 快速会话")
         let screen = NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main
         if let screen {
@@ -43,10 +49,41 @@ public final class QuickChatController: ObservableObject {
                                   y: frame.minY + frame.height * 0.2 - Self.compactHeight / 2,
                                   width: width, height: Self.compactHeight), display: true)
         }
-        resizeForAttachments()
-        panel.makeKeyAndOrderFront(nil)
-        NSApplication.shared.activate(ignoringOtherApps: true)
-        focusRequest = UUID()
+        prepareInvocation(using: store.desktop) { [weak self] in
+            guard let self else { return }
+            resizeForAttachments()
+            panel.makeKeyAndOrderFront(nil)
+            NSApplication.shared.activate(ignoringOtherApps: true)
+            focusRequest = UUID()
+        }
+    }
+
+    func prepareInvocation(using desktop: DesktopSession, present: @escaping @MainActor () -> Void) {
+        showTask?.cancel()
+        snapshotTask?.cancel()
+        desktopSnapshot = nil
+        conversationID = UUID().uuidString
+        // 显示浮窗前保存文字和图片，模型读取时不再依赖用户后来的前台应用。
+        let capture = desktop.prepareInvocationSnapshot()
+        snapshotTask = capture
+        showTask = Task { [weak self] in
+            let snapshot = await capture.value
+            guard !Task.isCancelled, !capture.isCancelled, let self else { return }
+            desktopSnapshot = snapshot
+            snapshotTask = nil
+            showTask = nil
+            present()
+        }
+    }
+
+    func close() {
+        showTask?.cancel()
+        snapshotTask?.cancel()
+        showTask = nil
+        snapshotTask = nil
+        desktopSnapshot = nil
+        conversationID = nil
+        panel?.orderOut(nil)
     }
 
     private func resizeForAttachments() {
@@ -58,13 +95,14 @@ public final class QuickChatController: ObservableObject {
     }
 
     private final class InputPanel: NSPanel {
+        var onClose: (() -> Void)?
         override var canBecomeKey: Bool { true }
         override var canBecomeMain: Bool { false }
 
         override func sendEvent(_ event: NSEvent) {
             // 在文本编辑器或输入法消费 Esc 之前关闭浮窗。
             if event.type == .keyDown, ShortcutAction.closeQuickChat.defaultHotKey.matches(event) {
-                orderOut(nil)
+                onClose?()
                 return
             }
             super.sendEvent(event)
@@ -79,6 +117,8 @@ public final class QuickChatController: ObservableObject {
         @ObservedObject private var draft: InputDraft
         @ObservedObject private var desktop: DesktopSession
         @ObservedObject private var updates: UpdateController
+        @ObservedObject private var modelSettings: ModelConfigurationSession
+        @ObservedObject private var localModelSettings: LocalModelSettingsSession
         private var prompt: String { draft.text }
         @FocusState private var inputFocused: Bool
 
@@ -88,6 +128,8 @@ public final class QuickChatController: ObservableObject {
             draft = store.draft(for: .quickChat)
             desktop = store.desktop
             updates = store.updates
+            modelSettings = store.modelSettings
+            localModelSettings = store.localModelSettings
         }
 
         var body: some View {
@@ -103,12 +145,6 @@ public final class QuickChatController: ObservableObject {
                 .environment(\.layoutDirection, languages.layoutDirection)
                 .onAppear { inputFocused = true }
                 .onChange(of: controller.focusRequest) { _, _ in inputFocused = true }
-                .background {
-                    if store.hasPendingPrompt {
-                        Button(AppLocalization.text("停止当前任务"), action: store.stopCurrentTask)
-                            .appShortcut(.stop).hidden()
-                    }
-                }
         }
 
         private var glassInput: some View {
@@ -135,8 +171,10 @@ public final class QuickChatController: ObservableObject {
         }
 
         private var canSend: Bool {
-            store.isConnected && store.modelConfigured && !store.hasPendingPrompt
-                && !updates.isInstalling && !store.isLoadingConversation
+            store.isConnected && store.modelConfigured
+                && controller.desktopSnapshot != nil
+                && !updates.isInstalling && !modelSettings.isBusy && !localModelSettings.isBusy
+                && store.pendingConversationActions.isEmpty
                 && (!prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !desktop.attachments.isEmpty)
         }
 
@@ -151,7 +189,7 @@ public final class QuickChatController: ObservableObject {
                     .onSubmit(send)
                     .disabled(updates.isInstalling)
                 HStack(spacing: 8) {
-                    Button { controller.panel?.orderOut(nil) } label: {
+                    Button { controller.close() } label: {
                         Image(systemName: "xmark")
                             .font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(.white)
@@ -180,9 +218,10 @@ public final class QuickChatController: ObservableObject {
         }
 
         private func send() {
-            if store.ask(prompt) {
+            guard let snapshot = controller.desktopSnapshot, let id = controller.conversationID else { return }
+            if store.ask(prompt, startsNewConversation: true, newConversationID: id, desktopSnapshot: snapshot) {
                 store.setInputDraft("", for: .quickChat)
-                controller.panel?.orderOut(nil)
+                controller.close()
             }
         }
     }

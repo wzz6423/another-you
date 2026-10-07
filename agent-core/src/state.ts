@@ -21,6 +21,7 @@ export interface Proposal {
   text?: string;
   snoozedUntil?: string;
   archived?: boolean;
+  pinned?: boolean;
 }
 export interface ConversationTurn {
   id: string;
@@ -29,6 +30,7 @@ export interface ConversationTurn {
   error?: string;
 }
 export interface ConversationSession {
+  source?: "proactive";
   id: string;
   title: string;
   appName?: string;
@@ -36,6 +38,7 @@ export interface ConversationSession {
   updatedAt: string;
   state: "running" | "completed" | "failed";
   archived: boolean;
+  pinned?: boolean;
   forkedFrom?: { conversationId: string; messageId: string };
   messages: ConversationTurn[];
 }
@@ -87,6 +90,7 @@ export class StateStore {
       if (typeof proposal.id !== "string" || typeof proposal.title !== "string" || typeof proposal.summary !== "string" || !["pending", "running", "completed", "snoozed", "ignored", "failed"].includes(proposal.state)) {
         throw new Error("本地建议状态无效");
       }
+      proposal.pinned = proposal.pinned === true;
       if (proposal.state === "running") {
         proposal.state = "failed";
         proposal.text = "上次生成在完成前中断，可手动重试。";
@@ -95,6 +99,7 @@ export class StateStore {
     for (const session of value.conversations ?? []) {
       if (typeof session.id !== "string" || typeof session.title !== "string" || !Array.isArray(session.messages)
           || !["running", "completed", "failed"].includes(session.state)) throw new Error("本地会话状态无效");
+      session.pinned = session.pinned === true;
       if (session.state === "running") {
         session.state = "failed";
         for (const message of session.messages) {
@@ -107,6 +112,7 @@ export class StateStore {
 
   save(state: PersistedState, dataDir: string): void {
     const copy = structuredClone(state);
+    if ((!this.privacy.storePrompts || !this.privacy.storeResponses) && copy.proactive?.workAnalysis) copy.proactive.workAnalysis.insights = [];
     if (!this.privacy.storePrompts) {
       for (const rule of copy.rules ?? []) delete rule.context;
       for (const record of copy.activityRecords ?? []) delete record.appName;
@@ -129,22 +135,39 @@ export class StateStore {
         if (!this.privacy.storeResponses && message.response !== undefined) message.response = "回复内容未保存";
         if ((!this.privacy.storePrompts || !this.privacy.storeResponses) && message.error !== undefined) message.error = "错误详情未保存";
       }
+      if (session.source === "proactive" && (!this.privacy.storePrompts || !this.privacy.storeResponses)) {
+        session.title = "主动工作内容未保存";
+        for (const message of session.messages) { message.prompt = "消息内容未保存"; message.response = "回复内容未保存"; }
+      }
+    }
+    for (const record of copy.usageRecords ?? []) {
+      const fields = record as unknown as Record<string, unknown>;
+      if (!this.privacy.storePrompts) for (const key of ["appName", "bundleId", "windowTitle"]) delete fields[key];
+      if (!this.privacy.storePrompts || !this.privacy.storeResponses) delete fields.reason;
     }
     for (const event of copy.history) {
+      if (event.kind === "agent.activity" && event.payload.toolName === "computer_use" && event.payload.category === "context") {
+        for (const key of ["input", "result"]) delete event.payload[key];
+      }
       if ((!this.privacy.storePrompts || !this.privacy.storeResponses) && copy.proposals.some((proposal) => proposal.ruleId === "context-insight" && proposal.id === event.payload.suggestionId)) delete event.payload.text;
       if (event.kind === "proactive.suggestion" && event.payload.ruleId === "context-insight" && (!this.privacy.storePrompts || !this.privacy.storeResponses)) {
         event.payload.title = "工作与通知建议";
         event.payload.message = event.payload.summary = "建议内容未保存";
         event.payload.reason = "来自后台分析";
         delete event.payload.context;
+        delete event.payload.draft;
+        delete event.payload.text;
       }
       if (!this.privacy.storePrompts) {
-        delete event.payload.appName;
+        for (const key of ["appName", "bundleId", "windowTitle", "targetAppName", "targetBundleId", "targetWindowTitle"]) delete event.payload[key];
         delete event.payload.prompt;
         delete event.payload.context;
         delete event.payload.signal;
       }
       if (!this.privacy.storeResponses) delete event.payload.text;
+      if (event.kind === "agent.activity" && (!this.privacy.storePrompts || !this.privacy.storeResponses)) {
+        for (const key of ["input", "result", "reason", "message"]) delete event.payload[key];
+      }
       if ((!this.privacy.storePrompts || !this.privacy.storeResponses) && event.kind === "agent.error") {
         event.payload.message = "错误详情未保存";
       }

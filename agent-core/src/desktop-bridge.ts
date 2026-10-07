@@ -16,6 +16,36 @@ export interface ScreenshotAttachment {
   context?: Record<string, unknown>;
 }
 
+export interface DesktopSnapshot {
+  capturedAt: string;
+  context: Record<string, unknown>;
+  contextError?: string;
+  image?: ScreenshotAttachment;
+  mode?: "screen" | "window" | "region";
+  screenshotError?: string;
+}
+
+export function parseDesktopSnapshot(value: unknown): DesktopSnapshot | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("唤起时的桌面快照无效");
+  const snapshot = value as Record<string, unknown>;
+  if (typeof snapshot.capturedAt !== "string" || snapshot.capturedAt.length > 100 || !Number.isFinite(Date.parse(snapshot.capturedAt))) throw new Error("桌面快照缺少有效采集时间");
+  if (!snapshot.context || typeof snapshot.context !== "object" || Array.isArray(snapshot.context) || JSON.stringify(snapshot.context).length > 100_000) throw new Error("桌面快照上下文无效或过大");
+  const context = structuredClone(snapshot.context) as Record<string, unknown>;
+  if (context.pid !== undefined && (typeof context.pid !== "number" || !Number.isInteger(context.pid) || context.pid < 1 || context.pid > 2_147_483_647)) throw new Error("桌面快照的目标进程无效");
+  if (context.targetId !== undefined && (typeof context.targetId !== "string" || !context.targetId.length || context.targetId.length > 256)) throw new Error("应用快照的目标引用无效");
+  if (context.windowId !== undefined && context.windowId !== null && (typeof context.windowId !== "number" || !Number.isInteger(context.windowId) || context.windowId < 1 || context.windowId > 4_294_967_295)) throw new Error("应用快照的窗口编号无效");
+  for (const key of ["contextError", "screenshotError"] as const) {
+    if (snapshot[key] !== undefined && (typeof snapshot[key] !== "string" || snapshot[key].length > 2_000)) throw new Error("桌面快照错误信息无效或过长");
+  }
+  if (snapshot.mode !== undefined && !["screen", "window", "region"].includes(String(snapshot.mode))) throw new Error("桌面快照截图模式无效");
+  return { capturedAt: snapshot.capturedAt, context,
+    ...(snapshot.contextError !== undefined ? { contextError: snapshot.contextError as string } : {}),
+    ...(snapshot.image !== undefined ? { image: parseAttachments([snapshot.image])[0] } : {}),
+    ...(snapshot.mode !== undefined ? { mode: snapshot.mode as DesktopSnapshot["mode"] } : {}),
+    ...(snapshot.screenshotError !== undefined ? { screenshotError: snapshot.screenshotError as string } : {}) };
+}
+
 export function parseAttachments(value: unknown): ScreenshotAttachment[] {
   if (value === undefined) return [];
   if (!Array.isArray(value) || value.length > 4) throw new Error("最多附加 4 张截图");
@@ -92,22 +122,29 @@ export class DesktopBridge {
 
 export function desktopResult(result: Record<string, unknown>): AgentToolResult {
   const { image, ...context } = result;
+  const app = context.context && typeof context.context === "object" ? context.context as Record<string, unknown> : context;
+  const details = Object.fromEntries(["appName", "bundleId", "windowTitle"].flatMap(key => {
+    const value = app[key === "windowTitle" ? "title" : key];
+    return typeof value === "string" ? [[key, value.slice(0, 1000)]] : [];
+  }));
   const content: AgentToolResult["content"] = [{ type: "text", text: JSON.stringify(context).slice(0, 100_000) }];
   if (image) {
     const attachment = parseAttachments([image])[0];
     content.push({ type: "image", data: attachment.data, mimeType: attachment.mimeType });
   }
-  return { content, details: undefined };
+  return { content, details };
 }
 
 function defineTool<T extends TSchema>(tool: AgentTool<T>): AgentTool<T> { return tool; }
 
-export function createDesktopTools(bridge: DesktopBridge, allowForeground = false): AgentTool<any>[] {
+export function createDesktopTools(bridge: DesktopBridge | undefined, allowForeground = false, desktopSnapshot?: DesktopSnapshot): AgentTool<any>[] {
+  const snapshot = desktopSnapshot ? structuredClone(desktopSnapshot) : undefined;
   return [defineTool({
     name: "computer_use", label: "电脑操作",
-    description: "读取 macOS 应用上下文、截图，或按快照 elementId 操作。默认后台 AX 操作，不抢焦点。先获取 context 再使用其 elementId。后台不支持的操作会报错，禁止偷偷切换前台。网页请优先用 browser_use。",
+    description: "读取 macOS 应用上下文、截图，或用 snapshot 同时读取应用身份、窗口、文字、控件树和画面。默认后台 AX 操作，不抢焦点。先获取 context 再使用其 elementId。后台不支持的操作会报错，禁止偷偷切换前台。网页请优先用 browser_use。" + (snapshot ? " 本轮默认返回临时输入框唤起时的应用快照。需要补读时设置 refresh=true，只在后台读取原应用的原窗口；刷新后使用新的 elementId。原窗口失效会报错，不重新读取当前桌面。" : ""),
     parameters: Type.Object({
-      action: Type.Union(["capabilities", "context", "screenshot", "press", "setValue", "scroll", "click", "type", "key"].map(value => Type.Literal(value))),
+      action: Type.Union(["capabilities", "context", "snapshot", "screenshot", "press", "setValue", "scroll", "click", "type", "key"].map(value => Type.Literal(value))),
+      refresh: Type.Optional(Type.Boolean()),
       pid: Type.Optional(Type.Integer({ minimum: 1 })),
       elementId: Type.Optional(Type.String({ maxLength: 256 })),
       mode: Type.Optional(Type.Union([Type.Literal("window"), Type.Literal("screen")])),
@@ -121,8 +158,38 @@ export function createDesktopTools(bridge: DesktopBridge, allowForeground = fals
       amount: Type.Optional(Type.Integer({ minimum: 1, maximum: 10 })),
     }, { additionalProperties: false }),
     async execute(_id, params, signal) {
+      if (signal?.aborted) throw new Error("电脑操作已取消");
       if (params.background === false && !allowForeground) throw new Error("当前会话仅允许后台操作，请让用户开启前台控制后重新发送");
-      return desktopResult(await bridge.request({ ...params, background: params.background ?? true }, signal));
+      const read = ["context", "snapshot", "screenshot"].includes(params.action);
+      if (snapshot && read) {
+        if (params.pid !== undefined && params.pid !== snapshot.context.pid) throw new Error("本次桌面快照属于唤起输入框时的应用，不能读取后来切换的应用");
+        if (!params.refresh && params.action === "context") {
+          if (!Object.keys(snapshot.context).length) throw new Error(snapshot.contextError || "唤起输入框时未能采集应用上下文");
+          return desktopResult({ ...snapshot.context, capturedAt: snapshot.capturedAt, frozen: true,
+            ...(snapshot.contextError ? { warning: snapshot.contextError } : {}) });
+        }
+        if (!params.refresh) {
+          if (!snapshot.image && params.action === "screenshot") throw new Error(snapshot.screenshotError || "唤起输入框时未能采集截图");
+          return desktopResult({ ...snapshot, ...(snapshot.image ? { mode: snapshot.mode ?? "screen" } : {}), frozen: true });
+        }
+        if (typeof snapshot.context.targetId !== "string") throw new Error("唤起时未能固定原窗口，不能读取当前桌面");
+      }
+      if (!bridge) throw new Error("电脑操作需要连接 macOS 宿主");
+      const arguments_: Record<string, unknown> = { ...params, background: params.background ?? true };
+      delete arguments_.refresh;
+      if (snapshot && (read || params.pid === undefined || params.pid === snapshot.context.pid) && params.action !== "capabilities") {
+        if (typeof snapshot.context.targetId === "string") arguments_.targetId = snapshot.context.targetId;
+        if (read) {
+          arguments_.background = true;
+          if (params.action !== "context") arguments_.mode = "window";
+        }
+      }
+      if (snapshot && params.action !== "capabilities" && params.pid === undefined) {
+        if (typeof snapshot.context.pid !== "number") throw new Error("唤起输入框时未能确定目标应用，不能操作当前应用");
+        arguments_.pid = snapshot.context.pid;
+      }
+      const result = await bridge.request(arguments_, signal);
+      return desktopResult(snapshot && read ? { ...result, invocationCapturedAt: snapshot.capturedAt, frozen: false } : result);
     },
   })];
 }

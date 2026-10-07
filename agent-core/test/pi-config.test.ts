@@ -1,20 +1,21 @@
 import { strict as assert } from "node:assert";
 import { once } from "node:events";
 import { createServer } from "node:http";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { createDefaultConfig } from "../src/config.ts";
+import { readModelData, writeModelData } from "./model-storage-fixture.ts";
 import { PiSdkBackend } from "../src/pi-adapter.ts";
 import { ModelCommandHandler } from "../src/model-commands.ts";
 import type { AgentEvent } from "../src/events.ts";
 import { usePiFixture } from "./pi-fixture.ts";
 
-async function fixture(t: TestContext, hang = false, acceptedKey?: string) {
+async function fixture(t: TestContext, hang = false, acceptedKey?: string, echoRejectedKey = false) {
   const dataDir = await mkdtemp(join(tmpdir(), "another-you-pi-config-"));
   t.after(() => rm(dataDir, { recursive: true, force: true }));
-  const requests: { body: Record<string, unknown>; authorization?: string; path?: string }[] = [];
+  const requests: { body: Record<string, unknown>; authorization?: string; path?: string; session?: string | string[] }[] = [];
   let received!: () => void;
   const requested = new Promise<void>((done) => { received = done; });
   let disconnected!: () => void;
@@ -23,12 +24,12 @@ async function fixture(t: TestContext, hang = false, acceptedKey?: string) {
     res.once("close", disconnected);
     let raw = "";
     for await (const part of req) raw += part;
-    requests.push({ body: JSON.parse(raw), authorization: req.headers.authorization, path: req.url });
+    requests.push({ body: JSON.parse(raw), authorization: req.headers.authorization, path: req.url, session: req.headers["x-opencode-session"] });
     received();
     if (hang) return;
     if (acceptedKey && req.headers.authorization !== `Bearer ${acceptedKey}`) {
       res.writeHead(401, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: { message: "Fixture rejected credentials", type: "authentication_error" } }));
+      res.end(JSON.stringify({ error: { message: echoRejectedKey ? `Rejected ${req.headers.authorization}` : "Fixture rejected credentials", type: "authentication_error" } }));
       return;
     }
     res.writeHead(200, { "content-type": "text/event-stream" });
@@ -48,9 +49,9 @@ async function fixture(t: TestContext, hang = false, acceptedKey?: string) {
 
 test("Pi 原生默认模型、认证和每模型思考深度用于实际请求且不改配置", async (t) => {
   const f = await fixture(t);
-  await writeFile(join(f.directory, "settings.json"), JSON.stringify({ defaultProvider: "fixture-provider", defaultModel: "fixture", defaultThinkingLevel: "low", modelThinkingLevels: { "fixture-provider/fixture": "high" } }));
+  await writeModelData(join(f.directory, "settings.json"), JSON.stringify({ defaultProvider: "fixture-provider", defaultModel: "fixture", defaultThinkingLevel: "low", modelThinkingLevels: { "fixture-provider/fixture": "high" } }));
   const paths = ["settings.json", "models.json", "auth.json"].map((name) => join(f.directory, name));
-  const before = await Promise.all(paths.map((path) => readFile(path, "utf8")));
+  const before = await Promise.all(paths.map((path) => readModelData(path, "utf8")));
   await f.backend.initialize();
   assert.equal(f.backend.status().configured, true);
   assert.equal(f.backend.status().available, null);
@@ -64,29 +65,29 @@ test("Pi 原生默认模型、认证和每模型思考深度用于实际请求�
   assert.equal(f.requests[0].body.model, "fixture");
   assert.equal(f.requests[0].body.reasoning_effort, "high");
   assert.equal(f.requests[0].authorization, "Bearer another-you-fixture");
-  assert.deepEqual(await Promise.all(paths.map((path) => readFile(path, "utf8"))), before);
+  assert.deepEqual(await Promise.all(paths.map((path) => readModelData(path, "utf8"))), before);
 });
 
 test("Pi 配置刷新清除无效或缺失默认模型，不沿用上次成功缓存", async (t) => {
   const f = await fixture(t);
   await f.backend.initialize();
   const settingsPath = join(f.directory, "settings.json");
-  const settings = await readFile(settingsPath, "utf8");
-  await writeFile(settingsPath, "{ broken");
+  const settings = await readModelData(settingsPath, "utf8");
+  await writeModelData(settingsPath, "{ broken");
   await f.backend.reloadModelConfiguration();
   assert.equal(f.backend.status().configured, false);
   assert.equal(f.backend.status().model, "");
   await assert.rejects(f.backend.run({ prompt: "不能沿用旧模型" }), /settings/);
-  await writeFile(settingsPath, "{}");
+  await writeModelData(settingsPath, "{}");
   await f.backend.reloadModelConfiguration();
   assert.match(f.backend.status().message, /设置中选择模型/);
-  await writeFile(settingsPath, JSON.stringify({ defaultProvider: "fixture-provider", defaultModel: "missing-model" }));
+  await writeModelData(settingsPath, JSON.stringify({ defaultProvider: "fixture-provider", defaultModel: "missing-model" }));
   await f.backend.reloadModelConfiguration();
   assert.equal(f.backend.status().configured, false);
   assert.equal(f.backend.status().model, "");
   assert.match(f.backend.status().message, /missing-model/);
-  await writeFile(settingsPath, settings);
-  await writeFile(join(f.directory, "models.json"), "{ broken");
+  await writeModelData(settingsPath, settings);
+  await writeModelData(join(f.directory, "models.json"), "{ broken");
   await f.backend.reloadModelConfiguration();
   assert.equal(f.backend.status().configured, false);
   assert.equal(f.backend.status().model, "");
@@ -97,17 +98,17 @@ test("Pi auth 与模型思考能力刷新生效，缺少认证不会伪称可用
   const f = await fixture(t);
   await f.backend.initialize();
   const authPath = join(f.directory, "auth.json");
-  await writeFile(authPath, "{}");
+  await writeModelData(authPath, "{}");
   await f.backend.reloadModelConfiguration();
   assert.equal(f.backend.status().configured, false);
   assert.match(f.backend.status().message, /认证/);
   await assert.rejects(f.backend.run({ prompt: "缺少认证" }), /认证/);
-  await writeFile(authPath, JSON.stringify({ "fixture-provider": { type: "api_key", key: "fixture-refreshed-key" } }));
+  await writeModelData(authPath, JSON.stringify({ "fixture-provider": { type: "api_key", key: "fixture-refreshed-key" } }));
   const modelsPath = join(f.directory, "models.json");
-  const models = JSON.parse(await readFile(modelsPath, "utf8"));
+  const models = JSON.parse(await readModelData(modelsPath, "utf8"));
   models.providers["fixture-provider"].models[0].reasoning = false;
-  await writeFile(modelsPath, JSON.stringify(models));
-  await writeFile(join(f.directory, "settings.json"), JSON.stringify({ defaultProvider: "fixture-provider", defaultModel: "fixture", defaultThinkingLevel: "high" }));
+  await writeModelData(modelsPath, JSON.stringify(models));
+  await writeModelData(join(f.directory, "settings.json"), JSON.stringify({ defaultProvider: "fixture-provider", defaultModel: "fixture", defaultThinkingLevel: "high" }));
   await f.backend.reloadModelConfiguration();
   assert.equal(f.backend.status().configured, true);
   assert.equal(f.backend.status().available, null);
@@ -122,7 +123,7 @@ test("运行中的 Pi 请求保持模型快照，刷新立即返回并可取消"
   const running = f.backend.run({ prompt: "等待" });
   const rejected = assert.rejects(running, /abort|取消/i);
   await f.requested;
-  await writeFile(join(f.directory, "settings.json"), "{}");
+  await writeModelData(join(f.directory, "settings.json"), "{}");
   const before = Date.now();
   await f.backend.reloadModelConfiguration();
   assert.ok(Date.now() - before < 500);
@@ -137,8 +138,8 @@ test("运行中的 Pi 请求保持模型快照，刷新立即返回并可取消"
 
 test("账户配置到模型选择和连接测试经过实际HTTP，失败后重新配置恢复且不提供工具或写聊天", async t => {
   const f = await fixture(t, false, "working-fixture-key");
-  await writeFile(join(f.directory, "auth.json"), "{}");
-  await writeFile(join(f.directory, "settings.json"), "{}");
+  await writeModelData(join(f.directory, "auth.json"), "{}");
+  await writeModelData(join(f.directory, "settings.json"), "{}");
   await f.backend.initialize();
   const events: AgentEvent[] = [];
   const statuses: ReturnType<PiSdkBackend["status"]>[] = [];
@@ -189,14 +190,14 @@ test("账户配置到模型选择和连接测试经过实际HTTP，失败后重�
     assert.equal(messages.filter(message => message.role === "user").length, 1);
     assert.ok(JSON.stringify(messages).includes('Return only'));
   }
-  await assert.rejects(readFile(join(f.directory, "..", "state.json")));
+  await assert.rejects(readModelData(join(f.directory, "..", "state.json")));
   assert.ok(events.every(event => event.kind.startsWith("model.")));
 });
 
 test("完整 API 表单从空配置保存并经实际 HTTP 验证，错误密钥修复后恢复连接", async t => {
   const f = await fixture(t, false, "working-gateway-key");
   for (const name of ["models.json", "settings.json", "auth.json"]) {
-    await writeFile(join(f.directory, name), name === "models.json" ? '{"providers":{}}' : "{}");
+    await writeModelData(join(f.directory, name), name === "models.json" ? '{"providers":{}}' : "{}");
   }
   await f.backend.initialize();
   const events: AgentEvent[] = [];
@@ -231,7 +232,7 @@ test("完整 API 表单从空配置保存并经实际 HTTP 验证，错误密钥
   assert.ok(!f.requests[1].body.tools || (f.requests[1].body.tools as unknown[]).length === 0);
   assert.equal(JSON.stringify(events).includes("working-gateway-key"), false);
   assert.equal(JSON.stringify(events).includes("wrong-gateway-key"), false);
-  await assert.rejects(readFile(join(f.directory, "..", "state.json")));
+  await assert.rejects(readModelData(join(f.directory, "..", "state.json")));
 });
 
 test("连接测试取消终止实际 HTTP 请求并解除配置互斥", { timeout: 5000 }, async t => {
@@ -257,4 +258,76 @@ test("连接测试取消终止实际 HTTP 请求并解除配置互斥", { timeou
   assert.equal(f.requests.length, 1);
   await f.backend.changeModelConfiguration(() => f.backend.modelConfiguration.select("fixture-provider", "fixture", "off"));
   assert.equal(f.backend.status().available, null);
+});
+
+test("同提供方双账户切换恢复实际地址、密钥、模型和思考，重启保持且凭据仅主动回执可见", async t => {
+  const f = await fixture(t);
+  await f.backend.initialize();
+  const configuration = f.backend.modelConfiguration;
+  await f.backend.changeModelConfiguration(() => configuration.configureAPI({ provider: "fixture-provider", accountName: "Account A",
+    baseUrl: f.endpoint + "/account-a", api: "openai-completions", model: "fixture", apiKey: "secret-account-a", thinkingLevel: "high" }));
+  const accountA = configuration.snapshot.providers.find(item => item.id === "fixture-provider")!.accountId!;
+  await f.backend.run({ prompt: "A" });
+  await f.backend.changeModelConfiguration(() => configuration.configureAPI({ provider: "fixture-provider", accountName: "Account B", newAccount: true,
+    baseUrl: f.endpoint + "/account-b", api: "openai-completions", model: "fixture-b", apiKey: "secret-account-b", thinkingLevel: "off" }));
+  const accountB = configuration.snapshot.providers.find(item => item.id === "fixture-provider")!.accountId!;
+  assert.notEqual(accountA, accountB);
+  await f.backend.run({ prompt: "B" });
+  await f.backend.changeModelConfiguration(() => configuration.selectAccount(accountA));
+  await f.backend.run({ prompt: "A again" });
+  assert.deepEqual(f.requests.map(item => [item.path, item.authorization, item.body.reasoning_effort]), [
+    ["/v1/account-a/chat/completions", "Bearer secret-account-a", "high"],
+    ["/v1/account-b/chat/completions", "Bearer secret-account-b", undefined],
+    ["/v1/account-a/chat/completions", "Bearer secret-account-a", "high"],
+  ]);
+  assert.deepEqual(f.requests.map(item => item.body.model), ["fixture", "fixture-b", "fixture"]);
+  const before = JSON.stringify(configuration.snapshot);
+  await assert.rejects(f.backend.changeModelConfiguration(() => configuration.configureAPI({ provider: "fixture-provider", newAccount: true,
+    baseUrl: f.endpoint + "/invalid", api: "invalid-api", model: "fixture", apiKey: "failed-secret" })));
+  assert.equal(JSON.stringify(configuration.snapshot), before);
+  const events: AgentEvent[] = [];
+  const handler = new ModelCommandHandler(f.backend, event => events.push(event));
+  t.after(() => handler.close());
+  handler.handle({ op: "modelCatalog", requestId: "catalog" });
+  assert.equal(JSON.stringify([events, f.backend.status()]).includes("secret-account"), false);
+  handler.handle({ op: "modelCredentialRead", requestId: "reveal-a", accountId: accountA });
+  assert.equal(events.at(-1)?.kind, "model.credential");
+  assert.deepEqual(events.at(-1)?.payload, { requestId: "reveal-a", accountId: accountA, apiKey: "secret-account-a" });
+  configuration.close();
+  await f.backend.reloadModelConfiguration();
+  assert.equal(configuration.snapshot.providers.find(item => item.id === "fixture-provider")?.accountId, accountA);
+  assert.equal(configuration.snapshot.accounts?.filter(item => item.provider === "fixture-provider").length, 2);
+  assert.equal(f.backend.status().reasoningEffort, "high");
+  await f.backend.changeModelConfiguration(() => configuration.selectAccount(accountB));
+  await f.backend.run({ prompt: "B after reopen" });
+  assert.equal(f.requests.at(-1)?.authorization, "Bearer secret-account-b");
+  assert.equal(f.requests.at(-1)?.path, "/v1/account-b/chat/completions");
+});
+
+
+test("上游错误回显密钥时请求错误和模型状态均脱敏", async t => {
+  const f = await fixture(t, false, "accepted-key", true);
+  await f.backend.initialize();
+  await assert.rejects(f.backend.run({ prompt: "reject" }), error => {
+    assert.equal(String(error).includes("another-you-fixture"), false);
+    assert.match(String(error), /已隐藏/);
+    return true;
+  });
+  assert.equal(JSON.stringify(f.backend.status()).includes("another-you-fixture"), false);
+});
+
+
+test("OpenCode 请求沿用 Pi SDK 会话路由头，连接测试也自动生成会话", async (t) => {
+  const f = await fixture(t);
+  await writeModelData(join(f.directory, "models.json"), JSON.stringify({ providers: {
+    opencode: { baseUrl: f.endpoint, api: "openai-completions", models: [
+      { id: "fixture", name: "Fixture", input: ["text"], contextWindow: 4096, maxTokens: 128 },
+    ] },
+  } }));
+  await writeModelData(join(f.directory, "auth.json"), JSON.stringify({ opencode: { type: "api_key", key: "fixture-key" } }));
+  await writeModelData(join(f.directory, "settings.json"), JSON.stringify({ defaultProvider: "opencode", defaultModel: "fixture" }));
+  await f.backend.run({ prompt: "fixture", runId: "fixture-session", agentRole: "context-analyst" });
+  assert.equal(f.requests[0].session, "fixture-session");
+  await f.backend.run({ prompt: "fixture", agentRole: "context-analyst" });
+  assert.match(String(f.requests[1].session), /^[0-9a-f-]{36}$/);
 });

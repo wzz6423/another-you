@@ -10,6 +10,7 @@ import test, { type TestContext } from "node:test";
 import { AgentCore, type AgentEvent, type AgentConfig, type Proposal, type TriggerRule, createDefaultConfig, parseAgentConfig, saveConfig, PiSdkBackend } from "../src/index.ts";
 
 import { usePiFixture } from "./pi-fixture.ts";
+import { writeModelData } from "./model-storage-fixture.ts";
 
 type Body = Record<string, unknown>;
 interface ModelRequest { url: string; headers: IncomingMessage["headers"]; body: Body }
@@ -109,7 +110,7 @@ test("后台子 agent 与父 agent 使用独立角色且没有执行工具", asy
 test("Pi 未设置默认模型时明确未配置且忽略旧应用模型配置", async (t) => {
   const server = await modelServer(t);
   const config = await configFor(t, server.endpoint);
-  await writeFile(join(config.dataDir, "pi", "settings.json"), "{}");
+  await writeModelData(join(config.dataDir, "pi", "settings.json"), "{}");
   const legacy = parseAgentConfig({ ...config, model: { provider: "local", model: "fixture", endpoint: server.endpoint } });
   const backend = new PiSdkBackend(legacy);
   await backend.initialize();
@@ -264,7 +265,7 @@ test("JSONL 子进程完成建议、prompt、错误和重启恢复闭环", async
   assert.equal(server.requests.length, 2);
 });
 
-test("模型挂起时仍能暂停、查询、拒绝并发并及时关闭", async (t) => {
+test("模型挂起时仍能暂停、查询、拒绝同会话重复发送并及时关闭", async (t) => {
   const server = await modelServer(t, () => {});
   const config = await configFor(t, server.endpoint);
   const proc = await childCore(t, config);
@@ -283,6 +284,103 @@ test("模型挂起时仍能暂停、查询、拒绝并发并及时关闭", async
   assert.equal(result[0], 0, proc.stderr());
   assert.ok(Date.now() - before < 3000);
   assert.equal(proc.events.some((event) => event.kind === "agent.response"), false);
+});
+
+test("JSONL 并行会话分别生成，取消新会话不影响旧会话且全部历史可恢复", async (t) => {
+  const held = new Map<string, ServerResponse>();
+  const server = await modelServer(t, (res, request) => {
+    const input = JSON.stringify(request.body.messages);
+    for (const name of ["older", "newer", "cancelled"]) if (input.includes(`CONCURRENT_${name}`)) held.set(name, res);
+  });
+  const config = await configFor(t, server.endpoint);
+  config.scheduler.enabled = false;
+  config.proactive.enabled = false;
+  const proc = await childCore(t, config);
+  const waitForRequest = async (name: string) => {
+    for (let attempt = 0; attempt < 500 && !held.has(name); attempt++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.ok(held.has(name), `${name} must reach the model before the older request finishes`);
+  };
+  const reply = (name: string) => {
+    const response = held.get(name)!;
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.end(`data: ${JSON.stringify({ id: name, choices: [{ index: 0, delta: { role: "assistant", content: `RESULT_${name}` }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`);
+  };
+  for (const name of ["older", "newer", "cancelled"]) {
+    proc.send({ op: "prompt", requestId: `request-${name}`, conversationId: name, prompt: `CONCURRENT_${name}` });
+    await waitForRequest(name);
+  }
+  assert.equal(server.requests.length, 3);
+  for (const request of server.requests) {
+    assert.equal((JSON.stringify(request.body.messages).match(/CONCURRENT_/g) ?? []).length, 1);
+  }
+  proc.send({ op: "prompt", requestId: "duplicate-older", conversationId: "older", prompt: "不能重复发送" });
+  const duplicate = await proc.wait(event => event.kind === "agent.error" && event.payload.requestId === "duplicate-older");
+  assert.match(String(duplicate.payload.message), /当前会话正在处理请求/);
+  assert.equal(server.requests.length, 3);
+  reply("newer");
+  await proc.wait(event => event.kind === "agent.response" && event.payload.conversationId === "newer");
+  assert.equal(proc.events.some(event => event.kind === "agent.response" && event.payload.conversationId === "older"), false);
+  proc.send({ op: "cancel", conversationId: "cancelled" });
+  await proc.wait(event => event.kind === "agent.error" && event.payload.requestId === "request-cancelled");
+  const marker = proc.events.length;
+  proc.send({ op: "status" });
+  const status = await proc.wait(event => event.kind === "agent.status", marker);
+  const summaries = status.payload.conversations as { id: string; state: string }[];
+  assert.equal(summaries.find(session => session.id === "older")?.state, "running");
+  assert.equal(summaries.find(session => session.id === "newer")?.state, "completed");
+  assert.equal(summaries.find(session => session.id === "cancelled")?.state, "failed");
+  reply("older");
+  await proc.wait(event => event.kind === "agent.response" && event.payload.conversationId === "older");
+  proc.send({ op: "shutdown" });
+  assert.equal((await proc.exit)[0], 0, proc.stderr());
+  const restored = await childCore(t, config);
+  for (const name of ["older", "newer", "cancelled"]) {
+    restored.send({ op: "conversationRead", conversationId: name, readId: name });
+    const event = await restored.wait(event => event.kind === "conversation.messages" && event.payload.readId === name);
+    const session = event.payload.conversation as { state: string; messages: { prompt: string; response?: string; error?: string }[] };
+    assert.equal(session.messages.length, 1);
+    assert.equal(session.messages[0].prompt, `CONCURRENT_${name}`);
+    if (name === "cancelled") { assert.equal(session.state, "failed"); assert.ok(session.messages[0].error); }
+    else { assert.equal(session.state, "completed"); assert.equal(session.messages[0].response, `RESULT_${name}`); }
+  }
+  restored.send({ op: "shutdown" });
+  assert.equal((await restored.exit)[0], 0, restored.stderr());
+});
+
+test("JSONL 关闭会取消并等待全部并行请求，完整保存各自失败历史", async (t) => {
+  const server = await modelServer(t, () => {});
+  const config = await configFor(t, server.endpoint);
+  config.scheduler.enabled = false;
+  config.proactive.enabled = false;
+  const proc = await childCore(t, config);
+  const names = ["shutdown-older", "shutdown-newer", "shutdown-third"];
+  for (const name of names) proc.send({ op: "prompt", requestId: name, conversationId: name, prompt: `等待 ${name}` });
+  for (let attempt = 0; attempt < 500 && server.requests.length < names.length; attempt++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(server.requests.length, names.length);
+  proc.send({ op: "shutdown" });
+  const result = await Promise.race([proc.exit, new Promise<never>((_, reject) => {
+    const timer = setTimeout(() => reject(new Error("并行请求关闭超时")), 3000);
+    timer.unref();
+  })]);
+  assert.equal(result[0], 0, proc.stderr());
+  assert.equal(proc.events.some(event => event.kind === "agent.response"), false);
+  for (const name of names) {
+    assert.equal(proc.events.filter(event => event.kind === "agent.error" && event.payload.requestId === name).length, 1);
+    assert.equal(proc.events.filter(event => event.kind === "agent.usage" && event.payload.requestId === name && event.payload.outcome === "failed").length, 1);
+  }
+  const saved = JSON.parse(await readFile(join(config.dataDir, "state.json"), "utf8")) as {
+    conversations: { id: string; state: string; messages: { id: string; prompt: string; response?: string; error?: string }[] }[];
+  };
+  assert.equal(saved.conversations.length, names.length);
+  for (const name of names) {
+    const session = saved.conversations.find(session => session.id === name)!;
+    assert.equal(session.state, "failed");
+    assert.equal(session.messages.length, 1);
+    assert.equal(session.messages[0].id, name);
+    assert.equal(session.messages[0].prompt, `等待 ${name}`);
+    assert.equal(session.messages[0].response, undefined);
+    assert.ok(session.messages[0].error);
+  }
 });
 
 test("旧 strict-local 配置迁移完全权限，拒绝持久化明文 API 密钥", () => {
@@ -320,7 +418,7 @@ test("Pi 工具循环实际执行命令并累计每轮 token 和失败前用量"
   assert.deepEqual(response.toolCalls, [{ name: "shell", kind: "tool" }]);
   assert.deepEqual(response.usage, { inputTokens: 40, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 50 });
   assert.equal(response.reasoningEffort, "off");
-  assert.deepEqual(summary, { model: "fixture", outcome: "completed", usage: response.usage, reasoningEffort: "off", toolCalls: response.toolCalls });
+  assert.deepEqual(summary, { model: "fixture", outcome: "completed", usage: response.usage, reasoningEffort: "off", toolCalls: response.toolCalls, requestPath: "/v1/chat/completions" });
 });
 
 test("工具执行后模型失败仍报告已消耗 token，未报告用量保持未知", async (t) => {
@@ -350,7 +448,7 @@ test("JSONL 首次状态已加载 Pi，status 命令刷新 Pi 配置且不发送
   assert.equal((initial.payload.model as Body).configured, true);
   assert.equal((initial.payload.model as Body).provider, "fixture-provider");
   assert.equal((initial.payload.model as Body).configDirectory, join(config.dataDir, "pi"));
-  await writeFile(join(config.dataDir, "pi", "settings.json"), "{}");
+  await writeModelData(join(config.dataDir, "pi", "settings.json"), "{}");
   const marker = proc.events.length;
   proc.send({ op: "status" });
   const refreshed = await proc.wait((event) => event.kind === "agent.status", marker);

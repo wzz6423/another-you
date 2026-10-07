@@ -7,7 +7,10 @@ import XCTest
 @MainActor
 private final class PermissionClient: AgentClient {
     var onMessage: (@MainActor @Sendable (AgentClientMessage) -> Void)?
-    func start(configURL: URL) throws {}
+    var startError: Error?
+    func start(configURL: URL) throws {
+        if let startError { throw startError }
+    }
     func send(_ command: [String: JSONValue]) throws {}
     func stop() async { onMessage?(.connection(.stopped)) }
 
@@ -106,25 +109,65 @@ final class ProactivePermissionTests: XCTestCase {
         }
     }
 
-    func testInactiveOrDisabledProactiveSessionDoesNotPromptUntilResumed() async throws {
-        try await withStore { _, client, permissions, _ in
+    func testConnectRequestsNotificationsBeforeAgentConnectionEvenWhenStartupFails() async throws {
+        for startupFails in [false, true] {
+            try await withStore { store, client, permissions, _ in
+                if startupFails { client.startError = NSError(domain: "test", code: 1) }
+                store.connect()
+                await settle()
+                XCTAssertFalse(store.isConnected)
+                XCTAssertEqual(permissions.notificationRequests, 1)
+                XCTAssertEqual(permissions.accessibilityRequests, 0)
+                XCTAssertTrue(store.notificationsEnabled)
+                store.connect()
+                await settle()
+                XCTAssertEqual(permissions.notificationRequests, 1)
+            }
+        }
+    }
+
+    func testApplicationActivationRequestsNotificationsWithoutAgentConnection() async throws {
+        try await withStore { store, _, permissions, _ in
             permissions.canPresentPrompt = false
-            client.status()
+            NotificationCenter.default.post(name: NSApplication.didBecomeActiveNotification, object: nil)
             await settle()
             XCTAssertEqual(permissions.notificationChecks, 0)
             permissions.canPresentPrompt = true
-            client.status(paused: true)
+            NotificationCenter.default.post(name: NSApplication.didBecomeActiveNotification, object: nil)
             await settle()
-            client.status(schedulerEnabled: false)
-            await settle()
-            client.status(proactiveEnabled: false)
-            await settle()
-            XCTAssertEqual(permissions.notificationChecks, 0)
-            XCTAssertEqual(permissions.accessibilityRequests, 0)
-            client.status()
-            await settle()
+            XCTAssertFalse(store.isConnected)
             XCTAssertEqual(permissions.notificationRequests, 1)
-            XCTAssertEqual(permissions.accessibilityRequests, 1)
+            XCTAssertEqual(permissions.accessibilityRequests, 0)
+        }
+    }
+
+    func testPausedOrDisabledProactiveSessionStillRequestsNotifications() async throws {
+        for boundary in ["paused", "scheduler", "proactive"] {
+            try await withStore { store, client, permissions, defaults in
+                client.status(paused: boundary == "paused", schedulerEnabled: boundary != "scheduler", proactiveEnabled: boundary != "proactive")
+                await settle()
+                XCTAssertEqual(permissions.notificationRequests, 1, boundary)
+                XCTAssertEqual(permissions.accessibilityRequests, 0, boundary)
+                XCTAssertTrue(store.notificationsEnabled, boundary)
+                XCTAssertFalse(defaults.bool(forKey: "proactiveAccessibilityRequested"), boundary)
+                client.status()
+                await settle()
+                XCTAssertEqual(permissions.notificationRequests, 1, boundary)
+                XCTAssertEqual(permissions.accessibilityRequests, 1, boundary)
+            }
+        }
+    }
+
+    func testExplicitlyEnablingNotificationsRequestsPermissionWithoutAgentConnection() async throws {
+        try await withStore { store, _, permissions, defaults in
+            await store.setNotificationsEnabled(false)
+            XCTAssertEqual(permissions.notificationRequests, 0)
+            await store.setNotificationsEnabled(true)
+            XCTAssertFalse(store.isConnected)
+            XCTAssertEqual(permissions.notificationRequests, 1)
+            XCTAssertEqual(permissions.accessibilityRequests, 0)
+            XCTAssertTrue(store.notificationsEnabled)
+            XCTAssertTrue(defaults.bool(forKey: "notificationsEnabled"))
         }
     }
 
@@ -216,7 +259,7 @@ final class ProactivePermissionTests: XCTestCase {
         }
     }
 
-    func testAutomaticPromptRechecksSessionAfterAwaitingAuthorization() async throws {
+    func testAutomaticNotificationPromptIgnoresProactiveChangesButStillRequiresForeground() async throws {
         for boundary in ["paused", "disconnected", "inactive", "scheduler", "proactive"] {
             try await withStore { _, client, permissions, defaults in
                 permissions.suspendNotificationCheck = true
@@ -234,7 +277,7 @@ final class ProactivePermissionTests: XCTestCase {
                 permissions.pendingCheck?.resume(returning: .notDetermined)
                 permissions.pendingCheck = nil
                 await settle()
-                XCTAssertEqual(permissions.notificationRequests, 0, boundary)
+                XCTAssertEqual(permissions.notificationRequests, boundary == "inactive" ? 0 : 1, boundary)
                 XCTAssertEqual(permissions.accessibilityRequests, 0, boundary)
                 XCTAssertFalse(defaults.bool(forKey: "proactiveAccessibilityRequested"), boundary)
                 permissions.canPresentPrompt = true

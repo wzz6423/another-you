@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { once } from "node:events";
-import { access, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm, stat } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,6 +10,7 @@ import { createDefaultConfig } from "../src/config.ts";
 import type { AgentEvent } from "../src/events.ts";
 import { ModelCommandHandler } from "../src/model-commands.ts";
 import { hasExternalConfigurationValue, ModelConfiguration } from "../src/model-configuration.ts";
+import { readModelData, writeModelData } from "./model-storage-fixture.ts";
 import { PiSdkBackend } from "../src/pi-adapter.ts";
 import { writePiFixture } from "./pi-fixture.ts";
 
@@ -66,30 +67,30 @@ test("目录列出未认证的内置模型，选择和思考深度持久化且�
   assert.ok(f.configuration.snapshot.models.find(model => model.provider === "fixture-provider")?.configured);
   f.handler.handle({ op: "modelSelect", requestId: "select", provider: "fixture-provider", model: "fixture", thinkingLevel: "high" });
   await completed(f.events, "select");
-  const settings = JSON.parse(await readFile(join(f.directory, "settings.json"), "utf8"));
+  const settings = JSON.parse(await readModelData(join(f.directory, "settings.json"), "utf8"));
   assert.equal(settings.modelThinkingLevels["fixture-provider/fixture"], "high");
   assert.equal(f.backend.status().available, null);
   await f.configuration.load();
   assert.equal(f.configuration.snapshot.selected?.thinkingLevel, "high");
   await assert.rejects(f.configuration.select("fixture-provider", "missing"), /目录/);
   await assert.rejects(f.configuration.select("fixture-provider", "fixture", "max"), /思考深度/);
-  for (const name of ["auth.json", "settings.json", "models.json"]) assert.equal((await stat(join(f.directory, name))).mode & 0o777, 0o600);
+  assert.equal((await stat(join(f.directory, "models.sqlite"))).mode & 0o777, 0o600);
 });
 
 test("API 配置目录提供地址和协议，完整表单保存后重载并保留其他模型及账户", async t => {
   const f = await setup(t);
   assert.equal(f.configuration.snapshot.providers.find(provider => provider.id === "openai")?.apiConfiguration?.api, "openai-responses");
   assert.equal(f.configuration.snapshot.providers.find(provider => provider.id === "amazon-bedrock")?.apiConfiguration, undefined);
-  const previousModels = JSON.parse(await readFile(join(f.directory, "models.json"), "utf8"));
-  const previousAuth = JSON.parse(await readFile(join(f.directory, "auth.json"), "utf8"));
+  const previousModels = JSON.parse(await readModelData(join(f.directory, "models.json"), "utf8"));
+  const previousAuth = JSON.parse(await readModelData(join(f.directory, "auth.json"), "utf8"));
   f.handler.handle({ op: "modelConfigure", requestId: "configure", provider: " custom-gateway ", baseUrl: " https://api.example.invalid/v1 ",
     api: "openai-completions", model: " custom-model ", apiKey: " only-in-auth-file-key ", thinkingLevel: "off" });
   await completed(f.events, "configure");
   assert.equal(f.backend.status().configured, true);
   assert.equal(f.backend.status().available, null);
   assert.equal(f.backend.status().model, "custom-model");
-  const auth = JSON.parse(await readFile(join(f.directory, "auth.json"), "utf8"));
-  const models = JSON.parse(await readFile(join(f.directory, "models.json"), "utf8"));
+  const auth = JSON.parse(await readModelData(join(f.directory, "auth.json"), "utf8"));
+  const models = JSON.parse(await readModelData(join(f.directory, "models.json"), "utf8"));
   assert.deepEqual(auth["custom-gateway"], { type: "api_key", key: "only-in-auth-file-key" });
   assert.deepEqual(auth["fixture-provider"], previousAuth["fixture-provider"]);
   assert.deepEqual(models.providers["fixture-provider"], previousModels.providers["fixture-provider"]);
@@ -98,17 +99,17 @@ test("API 配置目录提供地址和协议，完整表单保存后重载并保�
   await f.backend.reloadModelConfiguration();
   assert.equal(f.configuration.snapshot.selected?.provider, "custom-gateway");
   assert.equal(f.configuration.snapshot.providers.find(provider => provider.id === "custom-gateway")?.apiConfiguration?.baseUrl, "https://api.example.invalid/v1");
-  for (const name of ["auth.json", "settings.json", "models.json"]) assert.equal((await stat(join(f.directory, name))).mode & 0o777, 0o600);
+  assert.equal((await stat(join(f.directory, "models.sqlite"))).mode & 0o777, 0o600);
 });
 
 test("API 配置保留已有密钥和模型能力，覆盖模型自身的地址和协议", async t => {
   const f = await setup(t);
   const path = join(f.directory, "models.json");
-  const models = JSON.parse(await readFile(path, "utf8"));
+  const models = JSON.parse(await readModelData(path, "utf8"));
   models.providers["fixture-provider"].models[0].baseUrl = "https://old.example.invalid/v1";
   models.providers["fixture-provider"].models[0].api = "openai-completions";
   models.providers["fixture-provider"].models.push({ id: "other-model", reasoning: false });
-  await writeFile(path, JSON.stringify(models));
+  await writeModelData(path, JSON.stringify(models));
   await f.backend.reloadModelConfiguration();
   await f.configuration.configureAPI({ provider: "fixture-provider", baseUrl: "https://new.example.invalid/v1", api: "openai-responses", model: "fixture", apiKey: "", thinkingLevel: "high" });
   assert.equal(f.configuration.selection?.model.baseUrl, "https://new.example.invalid/v1");
@@ -116,15 +117,15 @@ test("API 配置保留已有密钥和模型能力，覆盖模型自身的地址�
   assert.equal(f.configuration.selection?.model.reasoning, true);
   assert.deepEqual(f.configuration.selection?.model.input, ["text", "image"]);
   assert.equal(f.configuration.selection?.model.contextWindow, 32768);
-  const saved = JSON.parse(await readFile(path, "utf8"));
+  const saved = JSON.parse(await readModelData(path, "utf8"));
   assert.deepEqual(saved.providers["fixture-provider"].models.find((model: { id: string }) => model.id === "other-model"), models.providers["fixture-provider"].models[1]);
-  assert.equal(JSON.parse(await readFile(join(f.directory, "auth.json"), "utf8"))["fixture-provider"].key, "another-you-fixture");
+  assert.equal(JSON.parse(await readModelData(join(f.directory, "auth.json"), "utf8"))["fixture-provider"].key, "another-you-fixture");
 });
 
 test("API 配置拒绝无效字段、外部密钥和 OAuth 留空，坏输入及取消不改变已存配置", async t => {
   const f = await setup(t);
   const paths = ["models.json", "settings.json", "auth.json"].map(name => join(f.directory, name));
-  const before = await Promise.all(paths.map(path => readFile(path, "utf8")));
+  const before = await Promise.all(paths.map(path => readModelData(path, "utf8")));
   const input = { provider: "custom", baseUrl: "https://api.example.invalid/v1", api: "openai-completions", model: "fixture", apiKey: "fixture-key" };
   for (const invalid of [
     { baseUrl: "file:///tmp/fixture" }, { baseUrl: "ftp://example.invalid/v1" }, { baseUrl: "https://user:password@example.invalid/v1" },
@@ -135,8 +136,8 @@ test("API 配置拒绝无效字段、外部密钥和 OAuth 留空，坏输入及
   const abort = new AbortController();
   abort.abort();
   await assert.rejects(f.configuration.configureAPI(input, abort.signal), { name: "AbortError" });
-  assert.deepEqual(await Promise.all(paths.map(path => readFile(path, "utf8"))), before);
-  await writeFile(join(f.directory, "auth.json"), JSON.stringify({ openai: { type: "oauth", access: "oauth-access", refresh: "oauth-refresh", expires: Date.now() + 60_000 } }));
+  assert.deepEqual(await Promise.all(paths.map(path => readModelData(path, "utf8"))), before);
+  await writeModelData(join(f.directory, "auth.json"), JSON.stringify({ openai: { type: "oauth", access: "oauth-access", refresh: "oauth-refresh", expires: Date.now() + 60_000 } }));
   await f.backend.reloadModelConfiguration();
   await assert.rejects(f.configuration.configureAPI({ ...input, provider: "openai", apiKey: "" }), /API Key/);
 });
@@ -144,14 +145,14 @@ test("API 配置拒绝无效字段、外部密钥和 OAuth 留空，坏输入及
 test("API 保存后选择失败恢复原配置和凭据，失败回执不泄露新密钥", async t => {
   const f = await setup(t);
   const paths = ["models.json", "settings.json", "auth.json"].map(name => join(f.directory, name));
-  const before = await Promise.all(paths.map(async path => JSON.parse(await readFile(path, "utf8"))));
+  const before = await Promise.all(paths.map(async path => JSON.parse(await readModelData(path, "utf8"))));
   f.configuration.select = async () => { throw new Error("保存 failed-private-key 失败"); };
   f.handler.handle({ op: "modelConfigure", requestId: "rollback", provider: "fixture-provider", baseUrl: "https://api.example.invalid/v1",
     api: "openai-completions", model: "fixture", apiKey: "failed-private-key", thinkingLevel: "off" });
   const result = await completed(f.events, "rollback", "failed");
   assert.match(String(result.payload.message), /已隐藏/);
   assert.equal(JSON.stringify(f.events).includes("failed-private-key"), false);
-  assert.deepEqual(await Promise.all(paths.map(async path => JSON.parse(await readFile(path, "utf8")))), before);
+  assert.deepEqual(await Promise.all(paths.map(async path => JSON.parse(await readModelData(path, "utf8")))), before);
   assert.equal(f.backend.status().endpoint, "http://127.0.0.1:1/v1");
 });
 
@@ -160,7 +161,7 @@ test("离线读取拒绝环境与命令凭据，不执行认证命令，也不�
   assert.equal(hasExternalConfigurationValue("$$$ENV_KEY"), true);
   const f = await setup(t);
   const marker = join(f.dataDir, "credential-command-ran");
-  await writeFile(join(f.directory, "auth.json"), JSON.stringify({ openai: { type: "api_key", key: `!touch '${marker}'; printf fixture` } }));
+  await writeModelData(join(f.directory, "auth.json"), JSON.stringify({ openai: { type: "api_key", key: `!touch '${marker}'; printf fixture` } }));
   const originalDirectory = process.env.PI_CODING_AGENT_DIR;
   const originalKey = process.env.OPENAI_API_KEY;
   process.env.PI_CODING_AGENT_DIR = join(f.dataDir, "unrelated-pi");
@@ -172,7 +173,7 @@ test("离线读取拒绝环境与命令凭据，不执行认证命令，也不�
     assert.equal(provider?.configured, false);
     assert.match(provider?.configurationIssue ?? "", /环境变量或命令/);
     await assert.rejects(access(marker));
-    await writeFile(join(f.directory, "auth.json"), "{}");
+    await writeModelData(join(f.directory, "auth.json"), "{}");
     await f.configuration.load();
     assert.equal(f.configuration.snapshot.providers.find(item => item.id === "openai")?.configured, false);
     await assert.rejects(access(join(f.dataDir, "unrelated-pi")));
@@ -188,7 +189,7 @@ test("无本机 Pi 时保持空配置，之后安装 Pi 可自动发现", async 
   assert.equal(f.configuration.snapshot.selected, undefined);
   assert.equal(f.configuration.snapshot.message, undefined);
   await assert.rejects(access(f.source));
-  await assert.rejects(access(join(f.configuration.directory, "pi-discovery.json")));
+  await assert.rejects(readModelData(join(f.configuration.directory, "pi-discovery.json")));
   await writePiFixture(join(f.root, "source"), "http://127.0.0.1:1/v1", "high");
   await f.configuration.load();
   assert.equal(f.configuration.selection?.configured, true);
@@ -198,23 +199,23 @@ test("无本机 Pi 时保持空配置，之后安装 Pi 可自动发现", async 
 test("自动读取 Pi 模型、默认选择、每模型思考与账户，兼容官方 JSONC/BOM 且不改源文件", async t => {
   const f = await discoveryFixture(t);
   await writePiFixture(join(f.root, "source"), "http://127.0.0.1:1/v1", "low");
-  await writeFile(join(f.source, "settings.json"), '\uFEFF' + JSON.stringify({ defaultProvider: "fixture-provider", defaultModel: "fixture",
+  await writeModelData(join(f.source, "settings.json"), '\uFEFF' + JSON.stringify({ defaultProvider: "fixture-provider", defaultModel: "fixture",
     defaultThinkingLevel: "low", modelThinkingLevels: { "fixture-provider/fixture": "high" }, extensions: ["should-not-import"] }));
-  const models = await readFile(join(f.source, "models.json"), "utf8");
-  await writeFile(join(f.source, "models.json"), '\uFEFF// Pi supports JSON comments\n' + models);
-  await writeFile(join(f.source, "auth.json"), '\uFEFF' + JSON.stringify({ "fixture-provider": { type: "api_key", key: "fixture-pi-key" },
+  const models = await readModelData(join(f.source, "models.json"), "utf8");
+  await writeModelData(join(f.source, "models.json"), '\uFEFF// Pi supports JSON comments\n' + models);
+  await writeModelData(join(f.source, "auth.json"), '\uFEFF' + JSON.stringify({ "fixture-provider": { type: "api_key", key: "fixture-pi-key" },
     "openai-codex": { type: "oauth", access: "fixture-access", refresh: "fixture-refresh", expires: Date.now() + 60_000 } }));
   const names = ["settings.json", "models.json", "auth.json"];
-  const before = await Promise.all(names.map(name => readFile(join(f.source, name), "utf8")));
+  const before = await Promise.all(names.map(name => readModelData(join(f.source, name), "utf8")));
   await f.configuration.load();
   assert.equal(f.configuration.snapshot.message, undefined);
   assert.deepEqual(f.configuration.snapshot.selected, { provider: "fixture-provider", model: "fixture", thinkingLevel: "high" });
   assert.equal(f.configuration.selection?.configured, true);
   assert.equal(f.configuration.snapshot.providers.find(provider => provider.id === "openai-codex")?.credentialType, "oauth");
   assert.equal(JSON.stringify(f.configuration.snapshot).includes("fixture-pi-key"), false);
-  assert.equal(JSON.parse(await readFile(join(f.configuration.directory, "settings.json"), "utf8")).extensions, undefined);
-  assert.deepEqual(await Promise.all(names.map(name => readFile(join(f.source, name), "utf8"))), before);
-  for (const name of [...names, "pi-discovery.json"]) assert.equal((await stat(join(f.configuration.directory, name))).mode & 0o777, 0o600);
+  assert.equal(JSON.parse(await readModelData(join(f.configuration.directory, "settings.json"), "utf8")).extensions, undefined);
+  assert.deepEqual(await Promise.all(names.map(name => readModelData(join(f.source, name), "utf8"))), before);
+  assert.equal((await stat(join(f.configuration.directory, "models.sqlite"))).mode & 0o777, 0o600);
 });
 
 test("自动发现的 Pi 配置直接用于真实本地 HTTP 请求，无需手动选择或登录", async t => {
@@ -249,15 +250,15 @@ test("自动发现的 Pi 配置直接用于真实本地 HTTP 请求，无需手�
 test("已有应用 provider、账户和选择优先，补全缺失账户不覆盖明确思考深度", async t => {
   const f = await discoveryFixture(t);
   await writePiFixture(join(f.root, "source"), "http://127.0.0.1:2/v1", "high");
-  await writeFile(join(f.source, "auth.json"), JSON.stringify({ "fixture-provider": { type: "api_key", key: "source-key" },
+  await writeModelData(join(f.source, "auth.json"), JSON.stringify({ "fixture-provider": { type: "api_key", key: "source-key" },
     openai: { type: "api_key", key: "source-openai-key" } }));
   await writePiFixture(f.dataDir, "http://127.0.0.1:1/v1", "off");
-  await writeFile(join(f.configuration.directory, "settings.json"), JSON.stringify({ defaultProvider: "openai", defaultModel: "gpt-4.4.1",
+  await writeModelData(join(f.configuration.directory, "settings.json"), JSON.stringify({ defaultProvider: "openai", defaultModel: "gpt-4.4.1",
     defaultThinkingLevel: "low", modelThinkingLevels: { "fixture-provider/fixture": "off" } }));
   await f.configuration.load();
-  const settings = JSON.parse(await readFile(join(f.configuration.directory, "settings.json"), "utf8"));
-  const auth = JSON.parse(await readFile(join(f.configuration.directory, "auth.json"), "utf8"));
-  const models = JSON.parse(await readFile(join(f.configuration.directory, "models.json"), "utf8"));
+  const settings = JSON.parse(await readModelData(join(f.configuration.directory, "settings.json"), "utf8"));
+  const auth = JSON.parse(await readModelData(join(f.configuration.directory, "auth.json"), "utf8"));
+  const models = JSON.parse(await readModelData(join(f.configuration.directory, "models.json"), "utf8"));
   assert.equal(settings.defaultProvider, "openai");
   assert.equal(settings.defaultModel, "gpt-4.4.1");
   assert.equal(settings.defaultThinkingLevel, "low");
@@ -278,7 +279,7 @@ test("自动复用后源变更、删除或重启不覆盖应用选择，也不�
   await reopened.load();
   assert.equal(reopened.selection?.configured, false);
   assert.equal(reopened.snapshot.selected?.thinkingLevel, "low");
-  assert.equal(JSON.parse(await readFile(join(reopened.directory, "models.json"), "utf8")).providers["fixture-provider"].baseUrl, "http://127.0.0.1:1/v1");
+  assert.equal(JSON.parse(await readModelData(join(reopened.directory, "models.json"), "utf8")).providers["fixture-provider"].baseUrl, "http://127.0.0.1:1/v1");
   await rm(f.source, { recursive: true });
   await reopened.load();
   assert.equal(reopened.snapshot.message, undefined);
@@ -289,14 +290,14 @@ test("损坏的 Pi 配置不会污染应用，修复后重新读取自动恢复"
   const f = await discoveryFixture(t);
   await writePiFixture(join(f.root, "source"), "http://127.0.0.1:1/v1");
   for (const name of ["models.json", "settings.json", "auth.json"]) {
-    const before = await readFile(join(f.source, name), "utf8");
-    await writeFile(join(f.source, name), "{ broken");
+    const before = await readModelData(join(f.source, name), "utf8");
+    await writeModelData(join(f.source, name), "{ broken");
     await f.configuration.load();
     assert.match(f.configuration.snapshot.message ?? "", /本机 Pi 配置/);
     assert.equal(f.configuration.snapshot.selected, undefined);
-    assert.deepEqual(JSON.parse(await readFile(join(f.configuration.directory, "auth.json"), "utf8")), {});
-    await assert.rejects(access(join(f.configuration.directory, "pi-discovery.json")));
-    await writeFile(join(f.source, name), before);
+    assert.deepEqual(JSON.parse(await readModelData(join(f.configuration.directory, "auth.json"), "utf8")), {});
+    await assert.rejects(readModelData(join(f.configuration.directory, "pi-discovery.json")));
+    await writeModelData(join(f.source, name), before);
   }
   await f.configuration.load();
   assert.equal(f.configuration.selection?.configured, true);
@@ -307,11 +308,11 @@ test("本机 Pi 损坏不禁用应用现有配置，源凭据命令不会执行"
   const f = await discoveryFixture(t);
   await writePiFixture(f.dataDir, "http://127.0.0.1:1/v1");
   await mkdir(f.source, { recursive: true });
-  await writeFile(join(f.source, "auth.json"), "[]");
+  await writeModelData(join(f.source, "auth.json"), "[]");
   await f.configuration.load();
   assert.equal(f.configuration.selection?.configured, true);
   const marker = join(f.root, "must-not-execute");
-  await writeFile(join(f.source, "auth.json"), JSON.stringify({ openai: { type: "api_key", key: `!touch '${marker}'` } }));
+  await writeModelData(join(f.source, "auth.json"), JSON.stringify({ openai: { type: "api_key", key: `!touch '${marker}'` } }));
   await f.configuration.load();
   assert.equal(f.configuration.snapshot.message, undefined);
   assert.equal(f.configuration.snapshot.providers.find(provider => provider.id === "openai")?.configured, false);
@@ -330,13 +331,13 @@ test("API key 交互拒绝错误 prompt，保存后注销，认证内容不进�
   assert.equal(f.backend.isBusy, true);
   f.handler.handle({ op: "modelAuthReply", requestId: "key", promptId, value: "only-in-auth-file-key" });
   await completed(f.events, "key");
-  assert.equal(JSON.parse(await readFile(join(f.directory, "auth.json"), "utf8"))["fixture-provider"].key, "only-in-auth-file-key");
+  assert.equal(JSON.parse(await readModelData(join(f.directory, "auth.json"), "utf8"))["fixture-provider"].key, "only-in-auth-file-key");
   assert.equal(JSON.stringify(f.events).includes("only-in-auth-file-key"), false);
   assert.ok(f.events.every(event => event.kind.startsWith("model.")));
   f.handler.handle({ op: "modelLogout", requestId: "logout", provider: "fixture-provider" });
   await completed(f.events, "logout");
   assert.equal(f.configuration.snapshot.providers.find(provider => provider.id === "fixture-provider")?.configured, false);
-  assert.equal(JSON.parse(await readFile(join(f.directory, "auth.json"), "utf8"))["fixture-provider"], undefined);
+  assert.equal(JSON.parse(await readModelData(join(f.directory, "auth.json"), "utf8"))["fixture-provider"], undefined);
 });
 
 test("OAuth 企业域名允许留空，过期 prompt 不影响下一步授权码提交", async t => {
@@ -415,7 +416,7 @@ test("OAuth 取消结束等待、保留旧账户并解除配置互斥", async t 
       }, refresh: async credential => credential, toAuth: async credential => ({ apiKey: credential.access }),
     } } });
   });
-  const before = await readFile(join(f.directory, "auth.json"), "utf8");
+  const before = await readModelData(join(f.directory, "auth.json"), "utf8");
   f.handler.handle({ op: "modelLogin", requestId: "oauth", provider: "fixture-provider", authType: "oauth" });
   await eventMatching(f.events, event => event.kind === "model.auth" && event.payload.stage === "prompt");
   f.handler.handle({ op: "modelSelect", requestId: "busy", provider: "fixture-provider", model: "fixture" });
@@ -424,7 +425,7 @@ test("OAuth 取消结束等待、保留旧账户并解除配置互斥", async t 
   await completed(f.events, "oauth", "cancelled");
   assert.equal(loginSignal?.aborted, true);
   assert.equal(f.backend.isBusy, false);
-  assert.equal(await readFile(join(f.directory, "auth.json"), "utf8"), before);
+  assert.equal(await readModelData(join(f.directory, "auth.json"), "utf8"), before);
   f.handler.handle({ op: "modelSelect", requestId: "after-cancel", provider: "fixture-provider", model: "fixture" });
   await completed(f.events, "after-cancel");
 });
@@ -445,7 +446,7 @@ test("所有内置渠道的 API 凭据流程均可逐步配置并保存", async 
       if (event.kind === "model.operation") {
         assert.equal(event.payload.state, "succeeded", String(event.payload.message));
         assert.equal(f.configuration.snapshot.providers.find(item => item.id === provider.id)?.configured, true);
-        const credentials = JSON.parse(await readFile(join(f.directory, "auth.json"), "utf8"));
+        const credentials = JSON.parse(await readModelData(join(f.directory, "auth.json"), "utf8"));
         assert.equal(credentials[provider.id].key, `fixture-${provider.id}`);
         return;
       }
@@ -482,7 +483,7 @@ test("所有内置 OAuth 渠道进入授权流程后均可取消且不写入凭�
     { provider: "openai-codex", device: true }, { provider: "radius", device: true }];
   for (const scenario of cases) await t.test(`${scenario.provider}${scenario.device ? "/device-code" : ""}`, async () => {
     const requestId = `builtin-oauth-${scenario.provider}-${scenario.device}`;
-    const before = await readFile(join(f.directory, "auth.json"), "utf8");
+    const before = await readModelData(join(f.directory, "auth.json"), "utf8");
     const answered = new Set<string>();
     f.handler.handle({ op: "modelLogin", requestId, provider: scenario.provider, authType: "oauth" });
     for (let step = 0; step < 4; step++) {
@@ -498,7 +499,7 @@ test("所有内置 OAuth 渠道进入授权流程后均可取消且不写入凭�
         f.handler.handle({ op: "modelAuthCancel", requestId });
         await completed(f.events, requestId, "cancelled");
         assert.equal(f.backend.isBusy, false);
-        assert.equal(await readFile(join(f.directory, "auth.json"), "utf8"), before);
+        assert.equal(await readModelData(join(f.directory, "auth.json"), "utf8"), before);
         return;
       }
       const prompt = event.payload.prompt as AuthPrompt & { id: string; required: boolean };
@@ -598,7 +599,7 @@ test("OAuth 成功凭据持久化，离线重读不刷新令牌，实际认证�
   const auth = await currentModels!.getAuth("fixture-provider");
   assert.equal(auth?.auth.apiKey, "fixture-refreshed-access");
   assert.equal(refreshes, 1);
-  assert.equal(JSON.parse(await readFile(join(f.directory, "auth.json"), "utf8"))["fixture-provider"].access, "fixture-refreshed-access");
+  assert.equal(JSON.parse(await readModelData(join(f.directory, "auth.json"), "utf8"))["fixture-provider"].access, "fixture-refreshed-access");
   assert.equal(JSON.stringify(f.events).includes("fixture-access-code"), false);
 });
 
@@ -608,18 +609,143 @@ test("导入只复制模型定义与默认选择，保留独立账户，拒绝�
   t.after(() => rm(source, { recursive: true, force: true }));
   await writePiFixture(source, "http://127.0.0.1:1/v1", "high");
   const sourceDirectory = join(source, "pi");
-  const models = JSON.parse(await readFile(join(sourceDirectory, "models.json"), "utf8"));
+  await writeModelData(join(sourceDirectory, "settings.json"), JSON.stringify({ defaultProvider: "fixture-provider", defaultModel: "fixture",
+    defaultThinkingLevel: "high", modelThinkingLevels: {} }));
+  const models = JSON.parse(await readModelData(join(sourceDirectory, "models.json"), "utf8"));
   models.providers["fixture-provider"].apiKey = "imported-secret";
   models.providers["fixture-provider"].headers = { Authorization: "Bearer imported-secret" };
   models.providers["fixture-provider"].models[0].headers = { "x-api-key": "imported-secret" };
-  await writeFile(join(sourceDirectory, "models.json"), JSON.stringify(models));
-  const authBefore = await readFile(join(f.directory, "auth.json"), "utf8");
+  await writeModelData(join(sourceDirectory, "models.json"), JSON.stringify(models));
+  const authBefore = await readModelData(join(f.directory, "auth.json"), "utf8");
   await f.configuration.importConfiguration(sourceDirectory);
-  assert.equal((await readFile(join(f.directory, "models.json"), "utf8")).includes("imported-secret"), false);
-  assert.equal(await readFile(join(f.directory, "auth.json"), "utf8"), authBefore);
+  assert.equal((await readModelData(join(f.directory, "models.json"), "utf8")).includes("imported-secret"), false);
+  assert.equal(await readModelData(join(f.directory, "auth.json"), "utf8"), authBefore);
   assert.equal(f.configuration.snapshot.selected?.thinkingLevel, "high");
-  const before = await readFile(join(f.directory, "models.json"), "utf8");
-  await writeFile(join(sourceDirectory, "models.json"), '{"providers":[]}');
-  await assert.rejects(f.configuration.importConfiguration(sourceDirectory), /providers/);
-  assert.equal(await readFile(join(f.directory, "models.json"), "utf8"), before);
+  await f.configuration.importConfiguration(join(sourceDirectory, "models.json"));
+  assert.equal(f.configuration.snapshot.selected?.thinkingLevel, "high");
+  const before = await readModelData(join(f.directory, "models.json"), "utf8");
+  await writeModelData(join(sourceDirectory, "models.json"), '{"providers":[]}');
+  await assert.rejects(f.configuration.importConfiguration(sourceDirectory), /导入的 models.json 无效/);
+  assert.equal(await readModelData(join(f.directory, "models.json"), "utf8"), before);
+});
+
+test("无路径导入自动读取 Pi，合并新增模型并保留本地配置和账户，源文件只读", async t => {
+  const f = await setup(t);
+  const source = await mkdtemp(join(isolatedPiRoot, "manual-import-"));
+  const sourceDirectory = await writePiFixture(source, "https://imported.example.invalid/v1", "low");
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = sourceDirectory;
+  t.after(() => { process.env.PI_CODING_AGENT_DIR = previous; });
+  const modelsPath = join(sourceDirectory, "models.json");
+  const models = JSON.parse(await readModelData(modelsPath, "utf8"));
+  const provider = models.providers["fixture-provider"];
+  provider.models[0].name = "Imported duplicate";
+  provider.models.push({ ...provider.models[0], id: "new-model" });
+  models.providers["new-provider"] = { ...provider, apiKey: "inline-import-secret",
+    headers: { Authorization: "Bearer imported-header-secret" }, models: [{ ...provider.models[0], id: "imported" }] };
+  await writeModelData(modelsPath, '\uFEFF// Pi model configuration\n' + JSON.stringify(models));
+  await writeModelData(join(sourceDirectory, "settings.json"), JSON.stringify({ defaultProvider: "new-provider", defaultModel: "imported",
+    defaultThinkingLevel: "low", modelThinkingLevels: { "new-provider/imported": "high" } }));
+  await writeModelData(join(sourceDirectory, "auth.json"), JSON.stringify({ "new-provider": { type: "api_key", key: "source-auth-secret" } }));
+  const sourcePaths = ["models.json", "settings.json", "auth.json"].map(name => join(sourceDirectory, name));
+  const sourceBefore = await Promise.all(sourcePaths.map(path => readModelData(path, "utf8")));
+  const authBefore = await readModelData(join(f.directory, "auth.json"), "utf8");
+  const localBefore = JSON.parse(await readModelData(join(f.directory, "models.json"), "utf8"));
+
+  f.handler.handle({ op: "modelImport", requestId: "automatic-import" });
+  await completed(f.events, "automatic-import");
+  const saved = JSON.parse(await readModelData(join(f.directory, "models.json"), "utf8"));
+  assert.equal(saved.providers["fixture-provider"].baseUrl, localBefore.providers["fixture-provider"].baseUrl);
+  assert.deepEqual(saved.providers["fixture-provider"].models[0], localBefore.providers["fixture-provider"].models[0]);
+  assert.ok(saved.providers["fixture-provider"].models.some((model: { id: string }) => model.id === "new-model"));
+  assert.equal(saved.providers["new-provider"].models[0].id, "imported");
+  assert.equal(JSON.stringify(saved).includes("import-secret"), false);
+  assert.equal(JSON.stringify(saved).includes("imported-header-secret"), false);
+  assert.deepEqual(f.configuration.snapshot.selected, { provider: "new-provider", model: "imported", thinkingLevel: "high" });
+  assert.equal(f.configuration.snapshot.providers.find(provider => provider.id === "new-provider")?.configured, false);
+  await f.configuration.load();
+  assert.equal(await readModelData(join(f.directory, "auth.json"), "utf8"), authBefore);
+  assert.deepEqual(await Promise.all(sourcePaths.map(path => readModelData(path, "utf8"))), sourceBefore);
+  assert.equal(JSON.stringify(f.events).includes("source-auth-secret"), false);
+});
+
+test("自动导入缺失或损坏的 Pi 配置返回明确错误且不改变本地文件", async t => {
+  const f = await setup(t);
+  const source = await mkdtemp(join(isolatedPiRoot, "invalid-import-"));
+  const sourceDirectory = join(source, "pi");
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = sourceDirectory;
+  t.after(() => { process.env.PI_CODING_AGENT_DIR = previous; });
+  const localPaths = ["models.json", "settings.json", "auth.json"].map(name => join(f.directory, name));
+  const before = await Promise.all(localPaths.map(path => readModelData(path, "utf8")));
+  f.handler.handle({ op: "modelImport", requestId: "missing-import" });
+  const failure = await completed(f.events, "missing-import", "failed");
+  assert.match(String(failure.payload.message), /未找到 Pi 模型配置/);
+  await mkdir(sourceDirectory);
+  await assert.rejects(f.configuration.importConfiguration(), /未找到 Pi 模型配置/);
+  await writeModelData(join(sourceDirectory, "models.json"), "{ broken");
+  await assert.rejects(f.configuration.importConfiguration(), /导入的 models.json 无效/);
+  await writeModelData(join(sourceDirectory, "models.json"), '{"providers":{"bad":{"models":[{"id":"invalid"}]}}}');
+  await assert.rejects(f.configuration.importConfiguration(), /导入的 models.json 无效/);
+  await writeModelData(join(sourceDirectory, "models.json"), '{"providers":{}}');
+  await writeModelData(join(sourceDirectory, "settings.json"), "{ broken");
+  await assert.rejects(f.configuration.importConfiguration(), /settings.json 无法读取/);
+  assert.deepEqual(await Promise.all(localPaths.map(path => readModelData(path, "utf8"))), before);
+  await assert.rejects(readModelData(join(f.directory, "pi-discovery.json")), { code: "ENOENT" });
+});
+
+test("账户切换恢复不同协议与模型，取消保存回滚且重启不丢失原账户", async t => {
+  const f = await setup(t);
+  const c = f.configuration;
+  await c.configureAPI({ provider: "fixture-provider", baseUrl: "https://first.invalid/v1", api: "openai-completions",
+    model: "fixture", apiKey: "account-first", thinkingLevel: "high", accountName: "First" });
+  const first = c.snapshot.providers.find(item => item.id === "fixture-provider")!.accountId!;
+  await c.configureAPI({ provider: "fixture-provider", baseUrl: "https://second.invalid", api: "anthropic-messages",
+    model: "claude-second", apiKey: "account-second", thinkingLevel: "off", newAccount: true, accountName: "Second" });
+  const second = c.snapshot.providers.find(item => item.id === "fixture-provider")!.accountId!;
+  await c.selectAccount(first);
+  assert.equal(c.selection?.model.api, "openai-completions");
+  assert.equal(c.selection?.model.id, "fixture");
+  assert.equal(c.selection?.thinkingLevel, "high");
+  assert.equal(c.readAPIKey(first), "account-first");
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(c.configureAPI({ provider: "fixture-provider", baseUrl: "https://cancelled.invalid", api: "openai-responses",
+    model: "cancelled", apiKey: "cancelled-secret", newAccount: true }, controller.signal));
+  c.close();
+  await c.load();
+  assert.equal(c.snapshot.accounts?.filter(item => item.provider === "fixture-provider").length, 2);
+  await c.selectAccount(second);
+  assert.equal(c.selection?.model.api, "anthropic-messages");
+  assert.equal(c.selection?.model.id, "claude-second");
+  assert.equal(c.selection?.model.baseUrl, "https://second.invalid");
+  assert.equal(c.selection?.thinkingLevel, "off");
+  assert.equal(c.readAPIKey(second), "account-second");
+});
+
+test("旧配置迁移失败保留原文件，修复后原子迁移到 SQLite 并可重启", async t => {
+  const root = await mkdtemp(join(tmpdir(), "another-you-migration-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const directory = await writePiFixture(root, "http://127.0.0.1:1/v1");
+  const settingsPath = join(directory, "settings.json");
+  const original = await readModelData(settingsPath);
+  await writeModelData(settingsPath, "{broken");
+  const configuration = new ModelConfiguration(root);
+  t.after(() => configuration.close());
+  await configuration.load();
+  assert.match(configuration.message, /settings.json 无法读取/);
+  await access(join(directory, "auth.json"));
+  await access(join(directory, "models.json"));
+  assert.equal(await readModelData(settingsPath), "{broken");
+  await writeModelData(settingsPath, original);
+  await configuration.load();
+  assert.equal(configuration.selection?.configured, true);
+  const account = configuration.snapshot.providers.find(item => item.id === "fixture-provider")!.accountId!;
+  await assert.rejects(access(join(directory, "auth.json")), { code: "ENOENT" });
+  await assert.rejects(access(join(directory, "models.json")), { code: "ENOENT" });
+  assert.equal((await stat(join(directory, "models.sqlite"))).mode & 0o777, 0o600);
+  configuration.close();
+  await configuration.load();
+  assert.equal(configuration.snapshot.providers.find(item => item.id === "fixture-provider")!.accountId, account);
+  assert.equal(configuration.readAPIKey(account), "another-you-fixture");
 });

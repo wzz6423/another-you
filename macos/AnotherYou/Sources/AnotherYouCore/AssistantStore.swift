@@ -34,6 +34,8 @@ public final class AssistantStore: ObservableObject {
     }
     private var conversationDrafts: [String: ConversationDraft] = [:]
     private var sentAttachments: [String: [ScreenAttachment]] = [:]
+    private var pendingPrompts: [String: String] = [:]
+    private var unacknowledgedConversations: Set<String> = []
     @Published public private(set) var lastUpdated: Date?
     @Published public private(set) var statusMessage = "Agent 未启动"
     @Published public private(set) var connection: ConnectionState = .stopped
@@ -54,7 +56,7 @@ public final class AssistantStore: ObservableObject {
     public let desktop: DesktopSession
     public let proactiveContext: ProactiveContextSession
     public let modelSettings = ModelConfigurationSession()
-    public var modelsFileURL: URL { repository.piDirectory.appendingPathComponent("models.json") }
+    public let localModelSettings = LocalModelSettingsSession()
 
     private let agent: any AgentClient
     private let repository: AgentSettingsRepository
@@ -101,12 +103,18 @@ public final class AssistantStore: ObservableObject {
         activationObservation = NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)
             .sink { [weak self] _ in self?.prepareProactivePermissionsIfNeeded() }
         modelSettings.sendCommand = { [weak self] command in self?.send(command) == true }
+        localModelSettings.sendCommand = { [weak self] command in self?.send(command) == true }
+        localModelSettings.canStartOperation = { [weak self] in
+            guard let self else { return false }
+            return self.isConnected && !self.hasPendingPrompt && !self.cards.contains { $0.state == .running }
+                && !self.updates.isInstalling && !self.isShuttingDown && !self.modelSettings.isBusy
+        }
         modelSettings.openAuthenticationURL = { NSWorkspace.shared.open($0) }
         modelSettings.canStartOperation = { [weak self] in
             guard let self else { return false }
             return self.isConnected && !self.hasPendingPrompt && !self.hasActiveBackgroundAnalysis
                 && !self.cards.contains { $0.state == .running } && self.pendingActions.isEmpty
-                && !self.updates.isInstalling && !self.isShuttingDown
+                && !self.updates.isInstalling && !self.isShuttingDown && !self.localModelSettings.isBusy
         }
         appearance.apply()
     }
@@ -120,15 +128,18 @@ public final class AssistantStore: ObservableObject {
     public var isConnected: Bool { connection == .connected }
     public var completedCount: Int { cards.filter { $0.state == .completed }.count }
     public var pendingCount: Int { cards.filter { $0.state == .pending }.count }
-    public var hasPendingPrompt: Bool { conversation.contains(where: \.isPending) || sessions.contains { $0.state == "running" } }
+    public var hasPendingPrompt: Bool { !pendingPrompts.isEmpty || conversation.contains(where: \.isPending) || sessions.contains { $0.state == "running" } }
+    public var selectedConversationHasPendingPrompt: Bool {
+        conversation.contains(where: \.isPending) || sessions.contains { $0.id == selectedConversationID && $0.state == "running" }
+    }
     public var canInstallUpdate: Bool {
         !hasPendingPrompt && !cards.contains(where: { $0.state == .running }) && pendingActions.isEmpty
-            && !desktop.isCapturing && desktop.activity == nil && desktop.attachments.isEmpty
+            && !desktop.isCapturing && !desktop.isPreparingSnapshot && desktop.activity == nil && desktop.attachments.isEmpty
             && !isChangingPause && !isRestarting && !isShuttingDown && connection != .starting
             && inputDrafts.values.allSatisfy { $0.text.isEmpty }
             && conversationDrafts.values.allSatisfy { $0.text.isEmpty && $0.attachments.isEmpty }
             && !hasActiveBackgroundAnalysis
-            && !modelSettings.isBusy && pendingConversationActions.isEmpty && !isLoadingConversation
+            && !modelSettings.isBusy && !localModelSettings.isBusy && pendingConversationActions.isEmpty && !isLoadingConversation
     }
 
     func draft(for location: InputDraftLocation) -> InputDraft {
@@ -162,6 +173,7 @@ public final class AssistantStore: ObservableObject {
 
     public func connect() {
         updates.start()
+        prepareProactivePermissionsIfNeeded()
         guard !isConnected, connection != .starting, !isRestarting, !updates.isInstalling else { return }
         hasSentLaunchSignal = false
         do {
@@ -194,11 +206,11 @@ public final class AssistantStore: ObservableObject {
     public func apply(_ action: CardAction, to card: ProactiveCard) {
         guard isConnected, !updates.isInstalling, !pendingActions.contains(card.id),
               card.state == .pending || card.state == .failed || card.state == .snoozed else { return }
-        if action == .execute && !modelConfigured {
+        if action == .execute && !(card.usesLocalModel ? localModelSettings.configured : modelConfigured) {
             statusMessage = "请先在设置中选择模型并配置账户。"
             return
         }
-        if action == .execute && modelSettings.isBusy { return }
+        if action == .execute && (modelSettings.isBusy || localModelSettings.isBusy) { return }
         pendingActions.insert(card.id)
         if !send(["op": .string("decide"), "suggestionId": .string(card.id), "decision": .string(action.rawValue)]) {
             pendingActions.remove(card.id)
@@ -206,32 +218,65 @@ public final class AssistantStore: ObservableObject {
     }
 
     @discardableResult
-    public func ask(_ prompt: String) -> Bool {
+    public func ask(_ prompt: String, startsNewConversation: Bool = false, newConversationID: String? = nil, desktopSnapshot: [String: JSONValue]? = nil) -> Bool {
         var prompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         if prompt.isEmpty && !desktop.attachments.isEmpty { prompt = "请分析截图及应用上下文。" }
-        guard !prompt.isEmpty, isConnected, modelConfigured, !hasPendingPrompt, !updates.isInstalling, !modelSettings.isBusy, !selectedConversationArchived, !isLoadingConversation,
-              pendingConversationActions.isEmpty, selectedConversationID == nil || conversationActionError == nil else { return false }
+        guard !prompt.isEmpty, isConnected, modelConfigured, startsNewConversation || !selectedConversationHasPendingPrompt,
+              !updates.isInstalling, !modelSettings.isBusy, !localModelSettings.isBusy, startsNewConversation || !isLoadingConversation,
+              pendingConversationActions.isEmpty, startsNewConversation || !selectedConversationArchived,
+              startsNewConversation || selectedConversationID == nil || conversationActionError == nil else { return false }
+        if let newConversationID, sessions.contains(where: { $0.id == newConversationID }) { return false }
+        let previousConversationID = selectedConversationID
+        let previousMessages = startsNewConversation ? conversation : []
+        let previousError = conversationActionError
         conversationActionError = nil
         let id = UUID().uuidString
-        let sessionID = selectedConversationID ?? UUID().uuidString
-        if selectedConversationID == nil {
+        let sessionID = startsNewConversation ? newConversationID ?? UUID().uuidString : selectedConversationID ?? UUID().uuidString
+        if startsNewConversation {
+            conversation = []
+        } else if selectedConversationID == nil {
             conversationDrafts.removeValue(forKey: "")
         }
         selectedConversationID = sessionID
         sentAttachments[id] = desktop.attachments
         conversation.append(ConversationMessage(id: id, prompt: prompt, attachments: desktop.attachments))
         let captures = desktop.attachments.map(\.payload)
-        if !send(["op": .string("prompt"), "requestId": .string(id), "conversationId": .string(sessionID), "prompt": .string(prompt),
-                  "attachments": .array(captures), "allowForeground": .bool(desktop.allowForeground)]) {
-            conversation[conversation.count - 1].error = statusMessage
+        var command: [String: JSONValue] = ["op": .string("prompt"), "requestId": .string(id), "conversationId": .string(sessionID), "prompt": .string(prompt),
+                                           "attachments": .array(captures), "allowForeground": .bool(desktop.allowForeground)]
+        if let desktopSnapshot { command["desktopSnapshot"] = .object(desktopSnapshot) }
+        if !send(command) {
+            if startsNewConversation {
+                selectedConversationID = previousConversationID
+                conversation = previousMessages
+                conversationActionError = previousError
+                sentAttachments.removeValue(forKey: id)
+            } else {
+                conversation[conversation.count - 1].error = statusMessage
+            }
             return false
+        }
+        pendingPrompts[id] = sessionID
+        if let index = sessions.firstIndex(where: { $0.id == sessionID }) {
+            sessions[index].messages = conversation
+            sessions[index].state = "running"
+            sessions[index].updatedAt = Date()
+        } else {
+            let appName = desktopSnapshot?["context"]?.object?["appName"]?.string ?? desktop.attachments.first?.capture.context["appName"]?.string
+            sessions.insert(ConversationSession(id: sessionID, prompt: prompt, appName: appName, messages: conversation), at: 0)
+            unacknowledgedConversations.insert(sessionID)
+        }
+        if startsNewConversation {
+            // 两个入口共享附件预览；已随新消息发送的截图不再留给旧会话草稿。
+            conversationDrafts[previousConversationID ?? ""] = ConversationDraft(text: inputDraft(for: .conversation), attachments: [])
+            setInputDraft("", for: .conversation)
+            finishConversationRead()
         }
         desktop.clearAttachments()
         return true
     }
 
     public func newConversation() {
-        guard !hasPendingPrompt, pendingConversationFork == nil else { return }
+        guard pendingConversationFork == nil else { return }
         switchConversationDraft(to: nil)
         selectedConversationID = nil
         conversation = []
@@ -240,7 +285,7 @@ public final class AssistantStore: ObservableObject {
     }
 
     public func selectConversation(_ id: String) {
-        guard !hasPendingPrompt, pendingConversationFork == nil, let session = sessions.first(where: { $0.id == id }) else { return }
+        guard pendingConversationFork == nil, let session = sessions.first(where: { $0.id == id }) else { return }
         switchConversationDraft(to: id)
         selectedConversationID = id
         conversationActionError = nil
@@ -267,7 +312,7 @@ public final class AssistantStore: ObservableObject {
     }
 
     public var canForkConversation: Bool {
-        isConnected && !updates.isInstalling && !hasPendingPrompt && !isLoadingConversation
+        isConnected && !updates.isInstalling && !selectedConversationHasPendingPrompt && !isLoadingConversation
             && pendingConversationActions.isEmpty && conversationActionError == nil
             && selectedConversationID != nil && !conversation.isEmpty
     }
@@ -332,13 +377,20 @@ public final class AssistantStore: ObservableObject {
     private func consumeSessions(_ payload: [String: JSONValue]) {
         guard let values = payload["conversations"]?.array else { return }
         let previous = Dictionary(uniqueKeysWithValues: sessions.map { ($0.id, $0.messages) })
-        let decoded = values.compactMap { value -> ConversationSession? in
+        var decoded = values.compactMap { value -> ConversationSession? in
             guard let payload = value.object, var session = ConversationSession(payload: payload) else { return nil }
             if payload["messages"] == nil {
                 session.messages = session.id == selectedConversationID ? conversation : previous[session.id] ?? []
             }
+            for message in previous[session.id] ?? [] where pendingPrompts[message.id] == session.id && !session.messages.contains(where: { $0.id == message.id }) {
+                session.messages.append(message)
+            }
             return session
         }.sorted { $0.updatedAt > $1.updatedAt }
+        unacknowledgedConversations.subtract(decoded.map(\.id))
+        // 旧请求的状态回执可能早于刚提交的新会话，不能因此让新会话从列表消失。
+        decoded.append(contentsOf: sessions.filter { unacknowledgedConversations.contains($0.id) })
+        decoded.sort { $0.updatedAt > $1.updatedAt }
         setIfChanged(\.sessions, to: decoded)
         if let id = selectedConversationID {
             if let session = sessions.first(where: { $0.id == id }) { setIfChanged(\.conversation, to: messagesWithAttachments(session.messages)) }
@@ -356,15 +408,11 @@ public final class AssistantStore: ObservableObject {
     }
 
     public func stopCurrentTask() {
-        desktop.cancel()
-        if isConnected { send(["op": .string("cancel")]) }
+        guard isConnected, selectedConversationHasPendingPrompt, let id = selectedConversationID else { return }
+        send(["op": .string("cancel"), "conversationId": .string(id)])
     }
 
     public func setNotificationsEnabled(_ enabled: Bool) async {
-        await updateNotificationPreference(enabled, automatic: false)
-    }
-
-    private func updateNotificationPreference(_ enabled: Bool, automatic: Bool) async {
         let requestID = UUID()
         notificationRequestID = requestID
         guard enabled else {
@@ -386,7 +434,6 @@ public final class AssistantStore: ObservableObject {
             switch authorization {
             case .notDetermined:
                 guard proactivePermissions.canPresentPrompt else { return }
-                if automatic && (paused || !schedulerEnabled || !proactiveContext.enabled || !isConnected) { return }
                 granted = try await proactivePermissions.requestNotifications()
             case .authorized, .provisional: granted = true
             default: granted = false
@@ -406,13 +453,13 @@ public final class AssistantStore: ObservableObject {
     }
 
     private func prepareProactivePermissionsIfNeeded() {
-        guard notificationSupported, proactivePermissions.canPresentPrompt, isConnected,
-              schedulerEnabled, proactiveContext.enabled, !paused, !isShuttingDown, permissionTask == nil else { return }
+        guard notificationSupported, proactivePermissions.canPresentPrompt,
+              !isShuttingDown, permissionTask == nil else { return }
         permissionTask = Task { [weak self] in
             guard let self else { return }
             defer { permissionTask = nil }
             if notificationsEnabled, !hasCheckedNotificationPermission {
-                await updateNotificationPreference(true, automatic: true)
+                await setNotificationsEnabled(true)
             }
             guard !Task.isCancelled, !isShuttingDown, proactivePermissions.canPresentPrompt, isConnected, schedulerEnabled,
                   proactiveContext.enabled, !paused else { return }
@@ -428,8 +475,9 @@ public final class AssistantStore: ObservableObject {
 
     private func receive(_ message: AgentClientMessage) {
         defer {
+            localModelSettings.updateConnection(isConnected)
             modelSettings.updateConnection(connected: isConnected, busy: hasPendingPrompt || hasActiveBackgroundAnalysis
-                || cards.contains { $0.state == .running } || !pendingActions.isEmpty || updates.isInstalling)
+                || cards.contains { $0.state == .running } || !pendingActions.isEmpty || updates.isInstalling || localModelSettings.isBusy)
             updates.installWhenIdle()
         }
         switch message {
@@ -458,6 +506,14 @@ public final class AssistantStore: ObservableObject {
                 for index in conversation.indices where conversation[index].isPending {
                     conversation[index].error = "Agent 连接已断开，请重新连接后重试。"
                 }
+                for index in sessions.indices where sessions[index].state == "running" {
+                    sessions[index].state = "failed"
+                    for turn in sessions[index].messages.indices where sessions[index].messages[turn].isPending {
+                        sessions[index].messages[turn].error = "Agent 连接已断开，请重新连接后重试。"
+                    }
+                }
+                pendingPrompts.removeAll()
+                unacknowledgedConversations.removeAll()
             }
         case .protocolError(let error):
             statusMessage = error
@@ -472,6 +528,7 @@ public final class AssistantStore: ObservableObject {
     }
 
     private func consume(_ event: AgentEvent) {
+        if localModelSettings.consume(event) { return }
         if modelSettings.consume(event) { return }
         if event.kind == "context.request" || event.kind == "context.cancel" {
             guard !paused, !isShuttingDown, !isRestarting else { proactiveContext.cancel(); return }
@@ -488,6 +545,7 @@ public final class AssistantStore: ObservableObject {
         case "agent.status":
             consumeSessions(payload)
             if let status = payload["proactive"]?.object { proactiveContext.update(status) }
+            if let status = payload["localModel"]?.object { localModelSettings.update(status) }
             schedulerEnabled = payload["schedulerEnabled"]?.bool ?? true
             hasActiveBackgroundAnalysis = payload["proactive"]?.object?["running"]?.bool ?? false
             setIfChanged(\.paused, to: payload["paused"]?.bool ?? !(payload["schedulerEnabled"]?.bool ?? true))
@@ -520,7 +578,7 @@ public final class AssistantStore: ObservableObject {
                let decoded = try? JSONDecoder().decode([ActivityRecord].self, from: data) {
                 setIfChanged(\.activityRecords, to: ActivityRecord.retained(decoded))
             }
-            setIfChanged(\.statusMessage, to: paused ? "主动建议已暂停" : "正在按节奏留意工作与通知")
+            setIfChanged(\.statusMessage, to: paused ? "主动建议已暂停" : localModelSettings.configured ? "正在按节奏留意工作与通知" : "请配置本地模型后开启工作分析")
             prepareProactivePermissionsIfNeeded()
         case "conversation.messages": consumeConversationMessages(payload)
         case "conversation.updated":
@@ -555,17 +613,18 @@ public final class AssistantStore: ObservableObject {
             if let data = try? JSONEncoder().encode(record),
                let decoded = try? JSONDecoder().decode(UsageRecord.self, from: data),
                !usageRecords.contains(where: { $0.id == decoded.id }) {
-                let cutoff = Date().addingTimeInterval(-30 * 86400)
-                usageRecords = (usageRecords + [decoded]).filter { (AgentEvent.date(from: $0.occurredAt) ?? .distantPast) >= cutoff }
+                usageRecords = UsageRecord.retained(usageRecords + [decoded])
             }
         case "proactive.status":
             proactiveContext.update(payload)
             hasActiveBackgroundAnalysis = payload["running"]?.bool ?? false
         case "proactive.suggestion":
             if let card = ProactiveCard(payload: payload, event: event) {
-                if let index = cards.firstIndex(where: { $0.id == card.id }) { cards[index] = card }
-                else { cards.insert(card, at: 0) }
-                statusMessage = "有一条新建议，等你决定。"
+                if payload["conversationId"]?.string == nil {
+                    if let index = cards.firstIndex(where: { $0.id == card.id }) { cards[index] = card }
+                    else { cards.insert(card, at: 0) }
+                }
+                statusMessage = payload["conversationId"]?.string == nil ? "有一条新建议，等你决定。" : "主动工作草稿已生成"
                 notify(card)
             }
             mergeHistory([event])
@@ -580,16 +639,12 @@ public final class AssistantStore: ObservableObject {
             }
             mergeHistory([event])
         case "agent.response":
-            if let requestID = payload["requestId"]?.string,
-               let index = conversation.firstIndex(where: { $0.id == requestID }) {
-                conversation[index].response = payload["text"]?.string ?? "模型返回了空响应。"
-            }
+            completePrompt(payload, response: payload["text"]?.string ?? "模型返回了空响应。")
             mergeHistory([event])
         case "agent.error":
             let error = payload["message"]?.string ?? "Agent 发生错误。"
             statusMessage = error
-            if let requestID = payload["requestId"]?.string,
-               let index = conversation.firstIndex(where: { $0.id == requestID }) { conversation[index].error = error }
+            completePrompt(payload, error: error)
             if let suggestionID = payload["suggestionId"]?.string { pendingActions.remove(suggestionID) }
             if let id = payload["conversationId"]?.string, pendingConversationActions.remove(id) != nil { conversationActionError = error }
             if let fork = pendingConversationFork, payload["requestId"]?.string == fork.requestID {
@@ -601,6 +656,23 @@ public final class AssistantStore: ObservableObject {
             isChangingPause = false
             mergeHistory([event])
         default: break
+        }
+    }
+
+    private func completePrompt(_ payload: [String: JSONValue], response: String? = nil, error: String? = nil) {
+        guard let requestID = payload["requestId"]?.string else { return }
+        let id = pendingPrompts[requestID] ?? payload["conversationId"]?.string
+        if let receivedID = payload["conversationId"]?.string, let id, receivedID != id { return }
+        pendingPrompts.removeValue(forKey: requestID)
+        if let index = sessions.firstIndex(where: { $0.id == id }),
+           let turn = sessions[index].messages.firstIndex(where: { $0.id == requestID }) {
+            sessions[index].messages[turn].response = response
+            sessions[index].messages[turn].error = error
+            sessions[index].state = error == nil ? "completed" : "failed"
+        }
+        if let index = conversation.firstIndex(where: { $0.id == requestID }) {
+            conversation[index].response = response
+            conversation[index].error = error
         }
     }
 

@@ -21,10 +21,21 @@ private final class BoardTestClient: AgentClient {
 
 @MainActor
 final class ConversationBoardTests: XCTestCase {
-    private func session(_ id: String = "session", archived: Bool = false) -> JSONValue {
-        .object(["id": .string(id), "title": .string("测试会话"), "appName": .string("Fixture"),
-                 "state": .string("completed"), "archived": .bool(archived), "updatedAt": .string("2026-10-02T04:00:00Z"),
-                 "messages": .array([.object(["id": .string("turn"), "prompt": .string("历史输入"), "response": .string("历史回复")])])])
+    private func session(_ id: String = "session", archived: Bool = false, pinned: Bool? = nil,
+                         updatedAt: String = "2026-10-02T04:00:00Z", appName: String = "Fixture") -> JSONValue {
+        var payload: [String: JSONValue] = ["id": .string(id), "title": .string("测试会话"), "appName": .string(appName),
+                 "state": .string("completed"), "archived": .bool(archived), "updatedAt": .string(updatedAt),
+                 "messages": .array([.object(["id": .string("turn"), "prompt": .string("历史输入"), "response": .string("历史回复")])])]
+        if let pinned { payload["pinned"] = .bool(pinned) }
+        return .object(payload)
+    }
+
+    private func proposal(_ id: String = "proposal", pinned: Bool? = nil,
+                          createdAt: String = "2026-10-02T04:00:00Z", appName: String = "Fixture") -> JSONValue {
+        var payload: [String: JSONValue] = ["id": .string(id), "title": .string("测试建议"), "state": .string("pending"),
+                                           "createdAt": .string(createdAt), "context": .object(["appName": .string(appName)])]
+        if let pinned { payload["pinned"] = .bool(pinned) }
+        return .object(payload)
     }
 
     private func withStore(_ body: (AssistantStore, BoardTestClient) async throws -> Void) async throws {
@@ -56,6 +67,102 @@ final class ConversationBoardTests: XCTestCase {
             XCTAssertTrue(store.sessions[0].archived)
             XCTAssertTrue(store.pendingConversationActions.isEmpty)
         }
+    }
+
+    func testLegacySessionsAndProposalsDefaultToUnpinned() async throws {
+        try await withStore { store, client in
+            client.emit("agent.status", ["conversations": .array([session()]), "proposals": .array([proposal()])])
+            XCTAssertFalse(try XCTUnwrap(store.sessions.first).pinned)
+            XCTAssertFalse(try XCTUnwrap(store.cards.first).pinned)
+        }
+    }
+
+    func testPinAndUnpinWaitForSuccessfulReceiptsAndPreserveArchiveStatus() async throws {
+        try await withStore { store, client in
+            client.emit("agent.status", ["conversations": .array([session(archived: true)])])
+            for pinned in [true, false] {
+                let action = pinned ? "pin" : "unpin"
+                store.manageConversation("session", action: action)
+                XCTAssertEqual(client.commands.last?["op"], .string("conversationAction"))
+                XCTAssertEqual(client.commands.last?["action"], .string(action))
+                XCTAssertEqual(store.sessions[0].pinned, !pinned)
+                XCTAssertTrue(store.sessions[0].archived)
+                XCTAssertTrue(store.pendingConversationActions.contains("session"))
+                client.emit("agent.error", ["conversationId": .string("session"), "message": .string("保存失败")])
+                XCTAssertEqual(store.sessions[0].pinned, !pinned)
+                XCTAssertTrue(store.pendingConversationActions.isEmpty)
+                XCTAssertEqual(store.conversationActionError, "保存失败")
+                store.manageConversation("session", action: action)
+                client.emit("conversation.updated", ["conversationId": .string("session"), "action": .string(action),
+                            "conversations": .array([session(archived: true, pinned: pinned)])])
+                XCTAssertEqual(store.sessions[0].pinned, pinned)
+                XCTAssertTrue(store.sessions[0].archived)
+                XCTAssertTrue(store.pendingConversationActions.isEmpty)
+                XCTAssertNil(store.conversationActionError)
+            }
+        }
+    }
+
+    func testPinSendFailureAndDisconnectKeepConfirmedState() async throws {
+        try await withStore { store, client in
+            client.emit("agent.status", ["conversations": .array([session(pinned: true)])])
+            client.failSend = true
+            store.manageConversation("session", action: "unpin")
+            XCTAssertTrue(store.sessions[0].pinned)
+            XCTAssertTrue(store.pendingConversationActions.isEmpty)
+            XCTAssertNotNil(store.conversationActionError)
+            client.failSend = false
+            store.manageConversation("session", action: "unpin")
+            client.onMessage?(.connection(.stopped))
+            XCTAssertTrue(store.sessions[0].pinned)
+            XCTAssertTrue(store.pendingConversationActions.isEmpty)
+            XCTAssertNotNil(store.conversationActionError)
+        }
+    }
+
+    func testProposalPinWaitsForReceiptAndReminderPreservesIt() async throws {
+        try await withStore { store, client in
+            await store.setNotificationsEnabled(false)
+            client.emit("agent.status", ["proposals": .array([proposal()])])
+            store.manageConversation("proposal", action: "pin")
+            XCTAssertFalse(store.cards[0].pinned)
+            client.emit("agent.error", ["conversationId": .string("proposal"), "message": .string("保存失败")])
+            XCTAssertFalse(store.cards[0].pinned)
+            XCTAssertTrue(store.pendingConversationActions.isEmpty)
+            store.manageConversation("proposal", action: "pin")
+            client.emit("conversation.updated", ["conversationId": .string("proposal"), "action": .string("pin"),
+                        "proposals": .array([proposal(pinned: true)])])
+            XCTAssertTrue(store.cards[0].pinned)
+            XCTAssertTrue(store.pendingConversationActions.isEmpty)
+            client.emit("proactive.suggestion", try XCTUnwrap(proposal(pinned: true).object))
+            XCTAssertEqual(store.cards.count, 1)
+            XCTAssertTrue(store.cards[0].pinned)
+            store.manageConversation("proposal", action: "unpin")
+            XCTAssertTrue(store.cards[0].pinned)
+            client.emit("conversation.updated", ["conversationId": .string("proposal"), "action": .string("unpin"),
+                        "proposals": .array([proposal(pinned: false)])])
+            XCTAssertFalse(store.cards[0].pinned)
+        }
+    }
+
+    func testBoardOrdersPinnedEntriesBeforeRecentUnpinnedEntriesWithinColumnsAndApplications() throws {
+        let sessions = [
+            session("new", updatedAt: "2026-10-05T04:00:00Z"),
+            session("pinned-old", pinned: true, updatedAt: "2026-10-01T04:00:00Z"),
+            session("pinned-new", pinned: true, updatedAt: "2026-10-03T04:00:00Z", appName: "Browser"),
+            session("normal-old", updatedAt: "2026-09-30T04:00:00Z"),
+            session("archived-pin", archived: true, pinned: true, updatedAt: "2026-09-20T04:00:00Z"),
+            session("archived-new", archived: true, updatedAt: "2026-10-06T04:00:00Z")
+        ]
+        let proposals = [proposal("pending", createdAt: "2026-10-04T04:00:00Z"), proposal("pinned-proposal", pinned: true)]
+        let entries = try sessions.map { BoardEntry(session: try XCTUnwrap(ConversationSession(payload: try XCTUnwrap($0.object)))) }
+            + proposals.map { BoardEntry(proposal: try XCTUnwrap(ProactiveCard(payload: try XCTUnwrap($0.object)))) }
+        let active = entries.filter { !$0.archived }.sorted(by: BoardEntry.ordered)
+        XCTAssertEqual(active.map(\.id), ["pinned-new", "pinned-proposal", "pinned-old", "new", "pending", "normal-old"])
+        XCTAssertEqual(active.filter(\.completed).map(\.id), ["pinned-new", "pinned-old", "new", "normal-old"])
+        XCTAssertEqual(active.filter { !$0.completed }.map(\.id), ["pinned-proposal", "pending"])
+        XCTAssertEqual(active.filter { $0.appName == "Fixture" }.map(\.id), ["pinned-proposal", "pinned-old", "new", "pending", "normal-old"])
+        XCTAssertEqual(entries.filter(\.archived).sorted(by: BoardEntry.ordered).map(\.id), ["archived-pin", "archived-new"])
     }
 
     func testRestoredSessionCanBeSelectedAndFollowupUsesSameIdentifier() async throws {

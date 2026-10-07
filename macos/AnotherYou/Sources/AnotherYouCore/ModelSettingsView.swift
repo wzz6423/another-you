@@ -1,17 +1,15 @@
 import AppKit
 import SwiftUI
-import UniformTypeIdentifiers
 
 @MainActor
 struct ModelSettingsView: View {
     @Environment(\.locale) private var interfaceLocale
     @ObservedObject var session: ModelConfigurationSession
-    let modelsFileURL: URL
     @State private var query = ""
     @State private var selectedID: String?
     @State private var thinkingLevel = "off"
     private var accountProviderID: String { session.accountProviderID }
-    @State private var isAPIKeyVisible = false
+    private var isAPIKeyVisible: Bool { session.isAPIKeyVisible }
     @FocusState private var authenticationInputFocused: Bool
     private static let customProviderID = ModelConfigurationSession.customProviderID
 
@@ -25,7 +23,7 @@ struct ModelSettingsView: View {
     var body: some View {
         Group {
             accountSection
-            if account?.configured == true, account?.apiConfiguration == nil || account?.credentialType == "oauth" { modelSelectionSection }
+            if !session.isNewAccount, account?.configured == true, account?.apiConfiguration == nil || account?.credentialType == "oauth" { modelSelectionSection }
             if session.catalog.selected != nil { connectionSection }
             if let message = session.message ?? session.catalog.message,
                message != "模型目录已更新",
@@ -37,32 +35,26 @@ struct ModelSettingsView: View {
                 HStack {
                     Button(AppLocalization.text("重新读取配置")) { session.reload() }.disabled(!session.canChange)
                     Button(AppLocalization.text("更新模型目录")) { session.refreshCatalog() }.disabled(!session.canChange)
-                }
-                DisclosureGroup(AppLocalization.text("自定义模型与导入")) {
-                    Text(AppLocalization.text("导入模型和默认选择，不导入凭据。"))
-                        .font(.caption).foregroundStyle(.secondary)
-                    HStack {
-                        Button(AppLocalization.text("导入 Pi 配置…"), action: chooseConfiguration).disabled(!session.canChange)
-                        Button(AppLocalization.text("编辑自定义模型")) { NSWorkspace.shared.open(modelsFileURL) }.disabled(!session.canChange)
-                    }
+                    Button(AppLocalization.text("导入 Pi 模型")) { session.importConfiguration() }.disabled(!session.canChange)
                 }
             }
         }
         .onAppear { session.loadCatalog(); synchronizeSelection(); authenticationInputFocused = session.authentication?.prompt != nil }
         .onChange(of: session.catalog.selected) { _, _ in synchronizeSelection(preferSavedSelection: true) }
         .onChange(of: session.catalog.providers) { _, _ in synchronizeSelection() }
+        .onChange(of: session.isNewAccount) { _, isNew in
+            if !isNew { synchronizeSelection() }
+        }
         .onChange(of: accountProviderID) { _, _ in
             query = ""
-            isAPIKeyVisible = false
+            session.clearAPIKey()
             selectedID = session.catalog.selected?.provider == accountProviderID ? session.catalog.selected?.id : nil
             prepareAPIConfiguration()
         }
         .onChange(of: session.apiConfigurationDraft.model) { _, value in
             selectedID = session.catalog.models.first { $0.provider == accountProviderID && $0.modelID == value }?.id
         }
-        .onChange(of: session.apiConfigurationDraft.apiKey) { _, value in
-            if value.isEmpty { isAPIKeyVisible = false }
-        }
+        .onDisappear { session.clearAPIKey() }
         .onChange(of: query) { _, _ in
             if !filteredModels.contains(where: { $0.id == selectedID }) { selectedID = nil }
         }
@@ -83,9 +75,24 @@ struct ModelSettingsView: View {
                 Text(AppLocalization.text("自定义 API")).tag(Self.customProviderID)
             }
             .disabled(session.isBusy)
+            if account != nil, session.authentication == nil {
+                if !session.providerAccounts.isEmpty {
+                    Picker(AppLocalization.text("已保存账户"), selection: Binding(get: { session.accountSelection }, set: { session.selectAccount($0) })) {
+                        ForEach(session.providerAccounts) { item in Text(item.name).tag(item.id) }
+                        Text(AppLocalization.text("新账户")).tag("")
+                    }
+                    .disabled(!session.canChange)
+                }
+                HStack {
+                    TextField(AppLocalization.text("账户名称"), text: $session.accountName)
+                        .textFieldStyle(.roundedBorder)
+                    Button(AppLocalization.text("添加账户")) { session.newAccount() }
+                        .disabled(!session.canChange || session.isNewAccount)
+                }
+            }
             if let account, session.authentication == nil {
-                if account.configured || account.apiConfiguration == nil {
-                    Text(AppLocalization.text(account.configured ? "凭据已配置" : "请先配置账户，再选择模型"))
+                if !session.isNewAccount && account.configured || account.apiConfiguration == nil {
+                    Text(AppLocalization.text(account.configured && !session.isNewAccount ? "凭据已配置" : "请先配置账户，再选择模型"))
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 if let issue = account.configurationIssue { Text(AppLocalization.message(issue)).font(.caption).foregroundStyle(.secondary) }
@@ -107,8 +114,23 @@ struct ModelSettingsView: View {
             if session.authentication == nil, accountProviderID == Self.customProviderID || account?.apiConfiguration != nil {
                 apiConfigurationFields
             }
+            if account?.apiConfiguration == nil, session.hasSavedAPIKey, session.authentication == nil {
+                LabeledContent("API Key") {
+                    HStack(spacing: 8) {
+                        Text(isAPIKeyVisible ? session.revealedAPIKey : "••••••••••••")
+                            .textSelection(.enabled).privacySensitive()
+                        Button { session.toggleAPIKeyVisibility() } label: {
+                            Image(systemName: isAPIKeyVisible ? "eye.slash" : "eye")
+                        }
+                        .buttonStyle(.borderless)
+                        .help(AppLocalization.text(isAPIKeyVisible ? "隐藏 API Key" : "显示 API Key"))
+                        .accessibilityLabel(AppLocalization.text(isAPIKeyVisible ? "隐藏 API Key" : "显示 API Key"))
+                    }
+                }
+                .disabled(!session.canChange)
+            }
             if let authentication = session.authentication { authenticationView(authentication) }
-            if let account, account.credentialType != nil, session.authentication == nil {
+            if let account, account.credentialType != nil, session.authentication == nil, !session.isNewAccount {
                 Button(AppLocalization.text("注销账户")) { session.logout(provider: account.id) }.disabled(!session.canChange)
             }
             if session.isLoading { ProgressView().controlSize(.small) }
@@ -120,6 +142,7 @@ struct ModelSettingsView: View {
         Group {
             if accountProviderID == Self.customProviderID {
                 TextField(AppLocalization.text("提供方名称"), text: $session.apiConfigurationDraft.provider, prompt: Text("my-api"))
+                TextField(AppLocalization.text("账户名称"), text: $session.accountName)
             }
             TextField(AppLocalization.text("接口地址 (Base URL)"), text: $session.apiConfigurationDraft.baseUrl,
                       prompt: Text("https://api.example.com/v1"))
@@ -130,16 +153,18 @@ struct ModelSettingsView: View {
             }
             LabeledContent("API Key") {
                 HStack(spacing: 8) {
-                    let placeholder = AppLocalization.text(session.hasSavedAPIKey ? "留空保留已保存的密钥" : "输入 API Key")
+                    let placeholder = session.hasSavedAPIKey ? "••••••••••••" : AppLocalization.text("输入 API Key")
+                    let key = Binding(get: { session.apiConfigurationDraft.apiKey.isEmpty && isAPIKeyVisible
+                        ? session.revealedAPIKey : session.apiConfigurationDraft.apiKey }, set: { session.editAPIKey($0) })
                     Group {
                         if isAPIKeyVisible {
-                            TextField(placeholder, text: $session.apiConfigurationDraft.apiKey)
+                            TextField(placeholder, text: key)
                         } else {
-                            SecureField(placeholder, text: $session.apiConfigurationDraft.apiKey)
+                            SecureField(placeholder, text: key)
                         }
                     }
                     .labelsHidden().privacySensitive()
-                    Button { isAPIKeyVisible.toggle() } label: {
+                    Button { session.toggleAPIKeyVisibility() } label: {
                         Image(systemName: isAPIKeyVisible ? "eye.slash" : "eye")
                     }
                     .buttonStyle(.borderless).frame(width: 24, height: 24)
@@ -187,16 +212,26 @@ struct ModelSettingsView: View {
             TextField(AppLocalization.text("搜索模型"), text: $query)
                 .textFieldStyle(.roundedBorder).multilineTextAlignment(.leading).labelsHidden()
             Text(AppLocalization.text("%d 个模型", filteredModels.count)).font(.caption).foregroundStyle(.secondary)
-            List(filteredModels, selection: $selectedID) { model in
-                HStack(spacing: 8) {
-                    Text(model.name).lineLimit(1)
-                    Spacer(minLength: 0)
-                    if model.supportsImages { Image(systemName: "photo").help(AppLocalization.text("支持图片")) }
+            ScrollView(.vertical) {
+                LazyVStack(spacing: 2) {
+                    ForEach(filteredModels) { model in
+                        Button { selectedID = model.id } label: {
+                            Text(model.name).lineLimit(1)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, 10).padding(.vertical, 6)
+                                .background(selectedID == model.id ? Color.accentColor.opacity(0.12) : .clear,
+                                            in: RoundedRectangle(cornerRadius: 6))
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(model.name + ", " + model.provider)
+                        .accessibilityAddTraits(selectedID == model.id ? .isSelected : [])
+                    }
                 }
-                .tag(model.id)
-                .accessibilityLabel(model.name + ", " + model.provider)
+                .padding(4)
             }
-            .listStyle(.inset).frame(height: 220)
+            .scrollIndicators(.visible)
+            .frame(height: 220)
             if let model, model.provider == accountProviderID {
                 if model.name != model.modelID { Text(model.modelID).font(.caption).foregroundStyle(.secondary).textSelection(.enabled) }
                 Picker(AppLocalization.text("思考深度"), selection: $thinkingLevel) {
@@ -307,20 +342,8 @@ struct ModelSettingsView: View {
     private func prepareAPIConfiguration() {
         if accountProviderID == Self.customProviderID {
             session.prepareAPIConfiguration(provider: nil)
-        } else if account?.apiConfiguration != nil {
+        } else if !accountProviderID.isEmpty {
             session.prepareAPIConfiguration(provider: accountProviderID)
-        }
-    }
-
-    private func chooseConfiguration() {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = true
-        panel.allowsMultipleSelection = false
-        panel.allowedContentTypes = [.json]
-        panel.prompt = AppLocalization.text("导入")
-        panel.begin { response in
-            if response == .OK, let url = panel.url { session.importConfiguration(from: url) }
         }
     }
 

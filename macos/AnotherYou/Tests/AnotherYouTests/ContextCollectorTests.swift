@@ -18,6 +18,11 @@ private struct FixtureAccessibility: ContextAccessibility {
 private actor SuspendedCollector: ContextCollecting {
     private var continuation: CheckedContinuation<ContextSnapshot, Never>?
     private(set) var sources: [String] = []
+    private(set) var hours: [Int] = []
+    func collect(source: String, lookbackHours: Int) async -> ContextSnapshot {
+        hours.append(lookbackHours)
+        return await collect(source: source)
+    }
     func collect(source: String) async -> ContextSnapshot {
         sources.append(source)
         return await withCheckedContinuation { continuation = $0 }
@@ -89,6 +94,22 @@ final class ContextCollectorTests: XCTestCase {
         XCTAssertEqual(session.stateLabel("work"), AppLocalization.text("需要辅助功能权限"))
         XCTAssertEqual(session.stateLabel("notifications"), AppLocalization.text("来源暂不可访问"))
         XCTAssertFalse(session.enabled)
+    }
+
+    @MainActor
+    func testSelectedLookbackIsPassedToTheCollector() async {
+        let collector = SuspendedCollector()
+        let session = ProactiveContextSession(collector: collector)
+        var replied = false
+        let event = AgentEvent(id: "lookback", occurredAt: "2026-10-07T00:00:00Z", kind: "context.request", source: "scheduler", payload: [
+            "requestId": .string("lookback"), "source": .string("work"), "lookbackHours": .number(720)])
+        session.handle(event) { _ in replied = true }
+        for _ in 0..<100 { if !(await collector.sources).isEmpty { break }; await Task.yield() }
+        let hours = await collector.hours
+        XCTAssertEqual(hours, [720])
+        await collector.complete()
+        for _ in 0..<100 { if replied { break }; await Task.yield() }
+        XCTAssertTrue(replied)
     }
 
     private func makeEvent(_ kind: String, id: String, source: String) -> AgentEvent {

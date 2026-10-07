@@ -103,7 +103,7 @@ node scripts/test-bundled-runtime.mjs "dist/macos/Another You.app"
 
 ## 签名与正式打包
 
-发布配置在 [release/config.json](../release/config.json)，目前公钥为 `null`，正式 preflight 会拒绝继续。第一次发布前准备 Another You 独立的 Ed25519 密钥和稳定代码签名证书，将公钥写入配置，私钥保存在仓库外并备份。不要复用其他应用的更新身份。两个架构应来自同一干净提交，版本使用 `X.Y.Z`，构建号必须比已发布版本递增。
+发布配置在 [release/config.json](../release/config.json)，已配置 Another You 独立的 Ed25519 公钥。正式打包需使用匹配的更新私钥和稳定代码签名证书，私钥保存在仓库外并备份。不要复用其他应用的更新身份。两个架构应来自同一干净提交，版本使用 `X.Y.Z`，构建号必须比已发布版本递增。
 
 | 变量 | 用途 |
 | --- | --- |
@@ -116,6 +116,8 @@ node scripts/test-bundled-runtime.mjs "dist/macos/Another You.app"
 | `NOTARYTOOL_PROFILE` | 可选公证 profile，需要 Developer ID Application 证书。 |
 
 稳定自签名证书不等于 Developer ID 或 Apple 公证。manifest 分别记录实际状态。首次初始化密钥时可用官方 `generate_keys --account another-you`；导出时使用同一 account，先设置 `umask 077`，不要打印或提交私钥。
+
+每次发版时由用户提供签名材料路径，按需设置 `SPARKLE_ED_KEY_FILE` 和 `CODE_SIGN_KEYCHAIN`。私人路径不写入 Skill、README 或仓库文件。私钥与 `.p12` 备份保存在仓库外的独立目录，目录权限为 `700`、文件权限为 `600`；迁移时保持已有签名身份与发布公钥不变。
 
 以下示例需要先设置上述环境与本次发布参数；`--config` 在子命令前，输出目录必须尚不存在：
 

@@ -63,4 +63,28 @@ final class DesktopSessionTests: XCTestCase {
         let message = ConversationMessage(id: "test", prompt: "截图", attachments: [attachment])
         XCTAssertEqual(message.attachments.first?.capture, capture)
     }
+
+    func testPromptCarriesInvocationSnapshotWithoutLeakingIntoFollowingMainConversation() async throws {
+        let domain = "another-you-invocation-prompt-\(UUID())"
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(domain)
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: domain))
+        defaults.set(false, forKey: "notificationsEnabled")
+        defer { defaults.removePersistentDomain(forName: domain); try? FileManager.default.removeItem(at: directory) }
+        let client = DesktopTestClient()
+        let store = AssistantStore(client: client, repository: AgentSettingsRepository(dataDirectory: directory), defaults: defaults,
+                                   updater: UpdateController(driver: nil, defaults: defaults))
+        client.onMessage?(.connection(.connected))
+        client.emit("agent.status", payload: ["model": .object(["configured": .bool(true)])])
+        let snapshot: [String: JSONValue] = ["capturedAt": .string("2026-10-07T10:00:00Z"),
+            "context": .object(["pid": .number(4242), "title": .string("唤起时的窗口")]),
+            "image": .object(["data": .string("/9j/"), "mimeType": .string("image/jpeg")]), "mode": .string("screen")]
+        XCTAssertTrue(store.ask("阅读一下屏幕", startsNewConversation: true, desktopSnapshot: snapshot))
+        XCTAssertEqual(client.commands.last?["desktopSnapshot"], .object(snapshot))
+        XCTAssertEqual(client.commands.last?["attachments"], .array([]))
+        let id = try XCTUnwrap(store.conversation.first?.id)
+        client.emit("agent.response", payload: ["requestId": .string(id), "text": .string("完成")])
+        XCTAssertTrue(store.ask("从主窗口继续"))
+        XCTAssertNil(client.commands.last?["desktopSnapshot"])
+        await store.shutdown()
+    }
 }

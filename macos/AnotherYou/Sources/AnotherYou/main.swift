@@ -57,7 +57,7 @@ struct AnotherYouApp: App {
                     }
                 }
         }
-        .defaultSize(width: 1040, height: 780)
+        .defaultSize(width: 1126, height: 710)
         .windowStyle(.hiddenTitleBar)
         .commands {
             CommandGroup(after: .appInfo) {

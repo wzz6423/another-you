@@ -29,6 +29,8 @@ description: 准备、执行或验证 Another You 的 macOS 发布、Sparkle 自
 
 Sparkle Ed25519 更新签名与 macOS 代码签名各自独立。不能借用 Zshell/Zisla 的更新私钥、公钥或配置来通过检查；已有 Another You 密钥必须复用，不能因失败静默轮换。首次初始化仅在用户已授权的签名设置范围内执行，私钥放仓库外并保护备份。不要打印私钥、凭据或钥匙串密码。
 
+每次发版使用用户当次提供的签名材料路径，按需设置 `SPARKLE_ED_KEY_FILE` 和 `CODE_SIGN_KEYCHAIN`，不自动沿用历史路径。不要把私人路径写入 Skill、README 或仓库文件。私钥与 `.p12` 备份保存在仓库外的独立目录，目录权限 `700`、文件权限 `600`；迁移时保持已有签名身份与发布公钥不变。
+
 稳定自签名证书不等于 Developer ID，也不等于 Apple 公证。按 manifest 与实际 `codesign`、公证结果说明分发状态。没有 `NOTARYTOOL_PROFILE` 时不能宣称已公证。
 
 发布包必须包含 `Contents/Resources/runtime/LICENSE` 和 `Contents/Resources/ThirdParty/Sparkle-LICENSE`；后者由本次官方 SwiftPM artifact 的 LICENSE 复制。不要用空文件或其他项目的许可证绕过验证。

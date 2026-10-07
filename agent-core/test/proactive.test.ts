@@ -12,7 +12,9 @@ const base = Date.parse("2026-10-01T04:00:00Z");
 const fast = { ...DEFAULT_PROACTIVE, workIntervalMs: 100, notificationsIntervalMs: 150, synthesisIntervalMs: 200, taskSpacingMs: 10, suggestionCooldownMs: 400 };
 const analysis = { summary: "测试工作遇到明确阻塞", actionable: true, evidence: ["测试任务尚未完成"] };
 const suggestion = { suggest: true, title: "先处理测试阻塞", message: "测试任务尚未完成，可以先查看失败原因。", reason: "工作内容出现阻塞", sources: ["work"] };
-const responseFor = (request: PiRequest): PiResponse => ({ text: JSON.stringify(request.agentRole === "proactive-parent" ? suggestion : analysis) });
+const responseFor = (request: PiRequest): PiResponse => ({ text: JSON.stringify(request.agentRole === "proactive-parent" ? {
+  ...suggestion, sources: (request.context?.findings as { source: string }[]).map(finding => finding.source),
+} : analysis) });
 
 function fixture(options: { run?: (request: PiRequest) => Promise<PiResponse>; config?: Partial<ProactiveConfig>; reply?: boolean } = {}) {
   let time = base;
@@ -49,28 +51,69 @@ test("旧配置迁移到低频默认值并拒绝过密、无界或无效周期",
   for (const value of [0, -1, 59999, Infinity, "300000"]) assert.throws(() => parseAgentConfig({ proactive: { workIntervalMs: value } }));
   assert.throws(() => parseAgentConfig({ proactive: { collectionTimeoutMs: 15000, taskTimeoutMs: 10000 } }));
   assert.equal(parseAgentConfig({ proactive: { enabled: false, workIntervalMs: 600000 } }).proactive.workIntervalMs, 600000);
+  assert.equal(config.proactive.workLookbackHours, 24);
+  for (const hours of [24, 168, 720]) assert.equal(parseAgentConfig({ proactive: { workLookbackHours: hours } }).proactive.workLookbackHours, hours);
+  for (const hours of [0, 1, 48, 721, "24", null]) assert.throws(() => parseAgentConfig({ proactive: { workLookbackHours: hours } }));
 });
 
-test("不同任务按各自周期错峰，子 agent 只返回分析，由父 agent 发建议", async () => {
+test("本机工作上下文继续分析未读批次并保留早期待办，回看范围传给宿主", async () => {
+  const f = fixture({ config: { workLookbackHours: 168 }, run: async request => {
+    if (request.agentRole === "proactive-parent") return responseFor(request);
+    const actionable = JSON.stringify(request.context).includes("FIRST_BLOCKER");
+    return { text: JSON.stringify({ ...analysis, actionable, summary: actionable ? "早期批次有明确阻塞" : "普通工作内容" }) };
+  } });
+  f.coordinator.registerSources(["work"]);
+  f.coordinator.noteSuggestion(base);
+  f.content.work = { scope: "local-work-context", items: [{ id: "project", source: "workspace", title: "项目", observedAt: new Date(base).toISOString(),
+    contentStatus: "complete", text: "FIRST_BLOCKER" + "正文".repeat(7500) + "LAST_PART" }] };
+  for (let at = 100; at <= 380; at += 20) await f.tick(at);
+  const analyzed = f.requests.filter(request => request.agentRole === "context-analyst");
+  assert.ok(analyzed.length > 1);
+  assert.ok(analyzed.some(request => JSON.stringify(request.context).includes("LAST_PART")));
+  assert.ok(analyzed.every(request => JSON.stringify(request.context).length <= 6000));
+  assert.ok(analyzed[0].prompt.includes("metadata-only"));
+  assert.ok(analyzed[0].prompt.includes("旧问题不能自动认定尚未解决"));
+  assert.ok(f.received.filter(event => event.kind === "context.request").every(event => event.payload.lookbackHours === 168));
+  await f.tick(420);
+  const parent = f.requests.find(request => request.agentRole === "proactive-parent");
+  assert.ok(parent);
+  assert.match(JSON.stringify(parent.context?.findings), /早期批次有明确阻塞/);
+  const previous = analyzed.length;
+  for (let at = 440; at <= 640; at += 20) await f.tick(at);
+  assert.equal(f.requests.filter(request => request.agentRole === "context-analyst").length, previous);
+});
+
+test("工作批次失败或取消不标记已完成，超大回包仍然拒绝", async () => {
+  const f = fixture({ run: async () => { throw new Error("暂时不可用"); } });
+  f.coordinator.registerSources(["work"]);
+  f.content.work = { scope: "local-work-context", items: [{ id: "file", source: "document", title: "文档", observedAt: new Date(base).toISOString(), contentStatus: "complete", text: "待分析" }] };
+  await f.tick(100);
+  assert.equal(f.coordinator.snapshot().workAnalysis?.completed.length, 0);
+  await f.tick(300);
+  assert.equal(f.requests.length, 2);
+  const g = fixture({ reply: false });
+  g.setTime(100); g.coordinator.tick(true); await Promise.resolve();
+  const request = g.received.find(event => event.kind === "context.request")!;
+  assert.throws(() => g.coordinator.receive({ requestId: String(request.payload.requestId), source: "work", status: "ok", content: { text: "x".repeat(512_000) } }), /512000/);
+  await g.coordinator.interrupt();
+});
+
+test("本地发现待办后立即安排汇总，不等待定时汇总周期", async () => {
   const f = fixture();
   await f.tick(99);
   assert.equal(f.requests.length, 0);
   await f.tick(100);
   await f.tick(105);
   await f.tick(150);
-  assert.deepEqual(f.requests.map((request) => request.agentRole), ["context-analyst", "notification-analyst"]);
-  assert.equal(f.received.filter((event) => event.kind === "proactive.suggestion").length, 0);
-  await f.tick(200);
-  assert.equal(f.requests.length, 2);
-  await f.tick(210);
-  assert.equal(f.requests[2].agentRole, "proactive-parent");
-  assert.equal((f.requests[2].context?.findings as unknown[]).length, 2);
+  assert.deepEqual(f.requests.map((request) => request.agentRole), ["context-analyst", "proactive-parent"]);
   assert.equal(f.received.filter((event) => event.kind === "proactive.suggestion").length, 1);
-  assert.equal(f.coordinator.snapshot().lastSuggestionAt, base + 210);
+  assert.equal(f.requests.length, 2);
+  assert.equal((f.requests[1].context?.findings as unknown[]).length, 1);
+  assert.equal(f.coordinator.snapshot().lastSuggestionAt, base + 150);
 });
 
 test("相同工作内容与重排后的旧通知不重复分析，只有新增通知进入子 agent", async () => {
-  const f = fixture({ config: { synthesisIntervalMs: 10000 } });
+  const f = fixture({ run: async () => ({ text: JSON.stringify({ ...analysis, actionable: false }) }), config: { synthesisIntervalMs: 10000 } });
   f.content.notifications.items = ["A", "B"];
   await f.tick(100);
   await f.tick(150);
@@ -185,7 +228,7 @@ test("AgentCore 前台提问抢占后台分析，暂停与停止保持可控", a
     backgroundStarted = true;
     return new Promise((_, reject) => request.signal?.addEventListener("abort", () => reject(new Error("后台取消")), { once: true }));
   } };
-  const core = new AgentCore({ config, rules: [], backend, now: () => new Date(now) });
+  const core = new AgentCore({ config, rules: [], backend, localBackend: backend, now: () => new Date(now) });
   t.after(async () => { core.stop(); await core.settleBackground(); });
   const events: AgentEvent[] = [];
   core.events.subscribe((event) => {
@@ -216,7 +259,7 @@ test("主动建议遵守内容不落盘配置，后台摘要不进入聊天历�
   config.privacy.storePrompts = false;
   const backend: PiAgentBackend = { source: { repository: "fixture", ref: "test", commit: "test" }, run: async (request) => responseFor(request) };
   let now = base;
-  const core = new AgentCore({ config, rules: [], backend, now: () => new Date(now) });
+  const core = new AgentCore({ config, rules: [], backend, localBackend: backend, now: () => new Date(now) });
   t.after(async () => { core.stop(); await core.settleBackground(); });
   core.registerContextSources(["work"]);
   core.events.subscribe((event) => {

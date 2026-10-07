@@ -47,7 +47,7 @@ public struct UsageDashboardView: View {
                     Image(systemName: "chart.pie").font(.system(size: 48)).foregroundStyle(.tertiary)
                     VStack(alignment: .leading, spacing: 6) {
                         Text(AppLocalization.text("这段时间还没有调用记录")).font(.headline)
-                        Text(AppLocalization.text("发起会话后查看真实用量；统计从此版本开始记录，保留最近 30 天。"))
+                        Text(AppLocalization.text("发起会话后查看真实用量；统计从此版本开始记录，保留最近 186 天。"))
                             .font(.callout).foregroundStyle(.secondary)
                     }
                 }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 16)

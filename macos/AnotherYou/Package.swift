@@ -47,7 +47,7 @@ let package = Package(
             name: "AnotherYouCore",
             dependencies: ["Sparkle"],
             path: "Sources/AnotherYouCore",
-            resources: [.process("Resources")]
+            resources: [.process("Resources"), .copy("Markdown")]
         ),
         .executableTarget(
             name: "AnotherYou",

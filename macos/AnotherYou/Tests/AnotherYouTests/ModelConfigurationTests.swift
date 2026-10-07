@@ -19,6 +19,85 @@ struct ModelConfigurationTests {
         PiModelOption(modelID: id, name: id.capitalized, provider: provider, input: ["text", "image"], thinkingLevels: ["off", "high"], contextWindow: 4096, maxTokens: 1024, configured: true)
     }
 
+    private func accountCatalog(_ id: String = "account-a") -> AgentEvent {
+        event("model.catalog", ["models": .array([]), "providers": .array([.object([
+            "id": .string("fixture"), "name": .string("Fixture"), "configured": .bool(true), "accountId": .string(id),
+            "credentialType": .string("api_key"), "authMethods": .array([]),
+            "apiConfiguration": .object(["baseUrl": .string("https://example.invalid/" + id), "api": .string("openai-completions")])])]),
+            "accounts": .array(["account-a", "account-b"].map { .object(["id": .string($0), "provider": .string("fixture"),
+                "name": .string($0), "hasAPIKey": .bool(true), "credentialType": .string("api_key")]) }),
+            "selected": .object(["provider": .string("fixture"), "model": .string(id), "thinkingLevel": .string("high")])])
+    }
+
+    @Test func savedKeyOnlyRevealsOnMatchingRequestAndNeverOverwritesEdits() {
+        let session = session()
+        var sent: [[String: JSONValue]] = []
+        session.sendCommand = { sent.append($0); return true }
+        _ = session.consume(accountCatalog())
+        session.accountProviderID = "fixture"
+        session.prepareAPIConfiguration(provider: "fixture")
+        #expect(session.hasSavedAPIKey && session.revealedAPIKey.isEmpty && !session.isAPIKeyVisible)
+        session.toggleAPIKeyVisibility()
+        let request = sent.last!
+        #expect(request["op"] == .string("modelCredentialRead"))
+        func reply(_ id: JSONValue, account: String = "account-a") -> AgentEvent {
+            event("model.credential", ["requestId": id, "accountId": .string(account), "apiKey": .string("saved-key")])
+        }
+        _ = session.consume(reply(.string("old")))
+        _ = session.consume(reply(request["requestId"]!, account: "account-b"))
+        #expect(session.revealedAPIKey.isEmpty)
+        _ = session.consume(reply(request["requestId"]!))
+        #expect(session.revealedAPIKey == "saved-key" && session.apiConfigurationDraft.apiKey.isEmpty)
+        session.toggleAPIKeyVisibility()
+        #expect(session.revealedAPIKey.isEmpty && !session.isAPIKeyVisible)
+        session.toggleAPIKeyVisibility()
+        let pending = sent.last!["requestId"]!
+        session.editAPIKey("new-key")
+        _ = session.consume(reply(pending))
+        #expect(session.apiConfigurationDraft.apiKey == "new-key" && session.revealedAPIKey.isEmpty)
+        session.clearAPIKey()
+        _ = session.consume(reply(pending))
+        #expect(session.apiConfigurationDraft.apiKey.isEmpty && session.revealedAPIKey.isEmpty && !session.isAPIKeyVisible)
+        session.toggleAPIKeyVisibility()
+        let disconnected = sent.last!["requestId"]!
+        session.updateConnection(connected: false, busy: false)
+        _ = session.consume(reply(disconnected))
+        #expect(session.revealedAPIKey.isEmpty && !session.isAPIKeyVisible)
+    }
+
+    @Test func accountSwitchWaitsForReceiptRestoresFormAndRejectsPreviousKey() {
+        let session = session()
+        var sent: [[String: JSONValue]] = []
+        session.sendCommand = { sent.append($0); return true }
+        _ = session.consume(accountCatalog())
+        session.accountProviderID = "fixture"
+        session.prepareAPIConfiguration(provider: "fixture")
+        session.toggleAPIKeyVisibility()
+        let oldRequest = sent.last!["requestId"]!
+        session.selectAccount("account-b")
+        #expect(session.activeAccountID == "account-a" && session.isBusy)
+        #expect(sent.last?["op"] == .string("modelAccountSelect"))
+        _ = session.consume(accountCatalog("account-b"))
+        session.prepareAPIConfiguration(provider: "fixture")
+        _ = session.consume(event("model.credential", ["requestId": oldRequest, "accountId": .string("account-a"), "apiKey": .string("old-key")]))
+        #expect(session.activeAccountID == "account-b" && session.accountName == "account-b")
+        #expect(session.apiConfigurationDraft.baseUrl == "https://example.invalid/account-b")
+        #expect(session.apiConfigurationDraft.model == "account-b" && session.revealedAPIKey.isEmpty)
+        _ = session.consume(event("model.operation", ["requestId": sent.last!["requestId"]!, "operation": .string("modelAccountSelect"), "state": .string("succeeded")]))
+        session.newAccount()
+        #expect(session.isNewAccount && !session.hasSavedAPIKey && session.accountName.isEmpty)
+        session.apiConfigurationDraft.model = "unsaved-new-model"
+        session.selectAccount("account-b")
+        #expect(!session.isNewAccount && session.apiConfigurationDraft.model == "account-b")
+        #expect(session.catalog.selected?.thinkingLevel == "high")
+        session.newAccount()
+        session.accountName = "Account C"
+        session.editAPIKey("new-account-key")
+        session.configureAPI(thinkingLevel: "off")
+        #expect(sent.last?["newAccount"] == .bool(true) && sent.last?["accountId"] == nil)
+        #expect(sent.last?["accountName"] == .string("Account C"))
+    }
+
     @Test func catalogSearchIncludesUnauthenticatedProvidersAndCapabilities() throws {
         var catalog = PiModelCatalog()
         catalog.models = [model(), model("beta", provider: "other")]
@@ -45,6 +124,24 @@ struct ModelConfigurationTests {
         session.updateConnection(connected: true, busy: true)
         session.select(model(), thinkingLevel: "off")
         #expect(sent.count == 1)
+    }
+
+    @Test func piImportUsesAutomaticDiscoveryAndWaitsForMatchingReceipt() {
+        let session = session()
+        var sent: [[String: JSONValue]] = []
+        session.sendCommand = { sent.append($0); return true }
+        session.importConfiguration()
+        #expect(sent.count == 1)
+        #expect(sent[0]["op"] == .string("modelImport"))
+        #expect(sent[0]["path"] == nil)
+        #expect(session.isBusy)
+        session.importConfiguration()
+        #expect(sent.count == 1)
+        _ = session.consume(event("model.operation", ["requestId": .string("stale"), "operation": .string("modelImport"), "state": .string("succeeded")]))
+        #expect(session.isBusy)
+        _ = session.consume(event("model.operation", ["requestId": sent[0]["requestId"]!, "operation": .string("modelImport"), "state": .string("failed"), "message": .string("未找到 Pi 模型配置")]))
+        #expect(session.message == "未找到 Pi 模型配置")
+        #expect(session.canChange)
     }
 
     @Test func apiConfigurationCatalogDecodesWithoutExposingCredentials() throws {

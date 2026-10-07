@@ -97,6 +97,13 @@ struct DesktopApplicationInfo {
     let pid: pid_t
     let name: String
     let bundleIdentifier: String?
+    var launchDate: Date? = nil
+}
+
+struct DesktopWindowInfo {
+    let id: CGWindowID
+    let title: String?
+    let frame: CGRect
 }
 
 // ScreenCaptureKit 的回调结果只单向交给主线程，锁保证超时、取消和系统回调只完成一次。
@@ -137,6 +144,18 @@ public final class DesktopAutomation {
     private let accessibility: any DesktopAccessibility
     private let application: (pid_t) -> DesktopApplicationInfo?
     private let frontmostPID: () -> pid_t?
+    private let windows: @MainActor (pid_t) -> [DesktopWindowInfo]
+    private let screenCaptureAllowed: () -> Bool
+    private let imageCapture: ((DesktopCaptureMode, pid_t, CGWindowID?, CGRect?) async throws -> CGImage)?
+    private struct InvocationTarget {
+        let app: DesktopApplicationInfo
+        let window: AXUIElement?
+        let windowInfo: DesktopWindowInfo?
+        let createdAt = Date()
+        var elements: [String: AXUIElement] = [:]
+        var elementDate = Date.distantPast
+    }
+    private var invocationTargets: [String: InvocationTarget] = [:]
     private var elements: [String: AXUIElement] = [:]
     private var snapshotPID: pid_t?
     private var snapshotDate = Date.distantPast
@@ -150,14 +169,20 @@ public final class DesktopAutomation {
     public convenience init() {
         self.init(accessibility: SystemDesktopAccessibility(), application: { pid in
             guard let app = NSRunningApplication(processIdentifier: pid), !app.isTerminated else { return nil }
-            return DesktopApplicationInfo(pid: pid, name: app.localizedName ?? "未知应用", bundleIdentifier: app.bundleIdentifier)
+            return DesktopApplicationInfo(pid: pid, name: app.localizedName ?? "未知应用", bundleIdentifier: app.bundleIdentifier, launchDate: app.launchDate)
         }, frontmostPID: { Self.frontmostApplicationPID })
     }
 
-    init(accessibility: any DesktopAccessibility, application: @escaping (pid_t) -> DesktopApplicationInfo?, frontmostPID: @escaping () -> pid_t?) {
+    init(accessibility: any DesktopAccessibility, application: @escaping (pid_t) -> DesktopApplicationInfo?, frontmostPID: @escaping () -> pid_t?,
+         windows: @escaping @MainActor (pid_t) -> [DesktopWindowInfo] = DesktopAutomation.applicationWindows,
+         screenCaptureAllowed: @escaping () -> Bool = { CGPreflightScreenCaptureAccess() },
+         imageCapture: ((DesktopCaptureMode, pid_t, CGWindowID?, CGRect?) async throws -> CGImage)? = nil) {
         self.accessibility = accessibility
         self.application = application
         self.frontmostPID = frontmostPID
+        self.windows = windows
+        self.screenCaptureAllowed = screenCaptureAllowed
+        self.imageCapture = imageCapture
     }
 
     public func handle(_ arguments: [String: JSONValue]) async throws -> [String: JSONValue] {
@@ -175,7 +200,25 @@ public final class DesktopAutomation {
             default: throw DesktopAutomationError.invalidArguments("permission 必须为 accessibility 或 screenRecording")
             }
             return capabilities
-        case "context", "snapshot": return try context(targetPID: try Self.pid(arguments["pid"]))
+        case "context": return try context(targetPID: try Self.pid(arguments["pid"]), targetID: arguments["targetId"]?.string)
+        case "snapshot":
+            let pid = try Self.pid(arguments["pid"])
+            let targetID = arguments["targetId"]?.string
+            let appContext = try context(targetPID: pid, targetID: targetID)
+            var result: [String: JSONValue] = ["context": .object(appContext), "capturedAt": .string(ISO8601DateFormatter().string(from: Date()))]
+            do {
+                guard let mode = DesktopCaptureMode(rawValue: arguments["mode"]?.string ?? "window"), mode != .region else {
+                    throw DesktopAutomationError.invalidArguments("应用快照 mode 必须为 window 或 screen")
+                }
+                let capture = try await capture(mode: mode, targetPID: pid, targetID: targetID, includeContext: false)
+                result["image"] = capture.json["image"]
+                result["mode"] = .string(capture.mode.rawValue)
+            } catch DesktopAutomationError.permissionDenied(let permission) {
+                result["screenshotError"] = .string(DesktopAutomationError.permissionDenied(permission).localizedDescription)
+            } catch DesktopAutomationError.timedOut {
+                result["screenshotError"] = .string(DesktopAutomationError.timedOut.localizedDescription)
+            }
+            return result
         case "screenshot":
             guard let mode = DesktopCaptureMode(rawValue: arguments["mode"]?.string ?? "window") else {
                 throw DesktopAutomationError.invalidArguments("mode 必须为 screen、window 或 region")
@@ -184,10 +227,12 @@ public final class DesktopAutomation {
             if mode == .region && region == nil && background {
                 throw DesktopAutomationError.unsupported("后台截图需要 rect；交互选区请明确设置 background=false")
             }
-            return try await capture(mode: mode, targetPID: Self.pid(arguments["pid"]), includeContext: arguments["includeContext"]?.bool ?? true, region: region).json
+            return try await capture(mode: mode, targetPID: Self.pid(arguments["pid"]), targetID: arguments["targetId"]?.string,
+                                     includeContext: arguments["includeContext"]?.bool ?? true, region: region).json
         case "press", "setValue", "scroll":
             guard accessibility.trusted else { throw DesktopAutomationError.permissionDenied("辅助功能权限") }
-            let element = try resolveElement(arguments)
+            let (element, pid) = try resolveElement(arguments)
+            let targetApp = application(pid)
             let result: AXError
             if action == "setValue" {
                 let value = try Self.input(arguments["value"])
@@ -214,7 +259,13 @@ public final class DesktopAutomation {
                 result = accessibility.perform(requested, on: element)
             }
             try checkAX(result)
-            return ["performed": .bool(true), "background": .bool(true), "action": .string(action)]
+            var receipt: [String: JSONValue] = ["performed": .bool(true), "background": .bool(true), "action": .string(action)]
+            if let targetApp {
+                receipt["pid"] = .number(Double(targetApp.pid))
+                receipt["appName"] = .string(targetApp.name)
+                receipt["bundleId"] = targetApp.bundleIdentifier.map(JSONValue.string) ?? .null
+            }
+            return receipt
         case "click", "type", "key":
             guard !background else { throw DesktopAutomationError.unsupported("\(action) 需要明确设置 background=false；后台请使用 press 或 setValue") }
             guard accessibility.trusted else { throw DesktopAutomationError.permissionDenied("辅助功能权限") }
@@ -226,15 +277,19 @@ public final class DesktopAutomation {
 
     public var capabilities: [String: JSONValue] {
         ["platform": .string("macOS"), "accessibilityGranted": .bool(accessibility.trusted),
-         "screenRecordingGranted": .bool(CGPreflightScreenCaptureAccess()),
-         "backgroundActions": .array(["context", "screenshot", "press", "setValue", "scroll"].map(JSONValue.string)),
+         "screenRecordingGranted": .bool(screenCaptureAllowed()),
+         "backgroundActions": .array(["context", "snapshot", "screenshot", "press", "setValue", "scroll"].map(JSONValue.string)),
          "foregroundActions": .array(["click", "type", "key"].map(JSONValue.string)),
          "captureModes": .array(DesktopCaptureMode.allCases.map { .string($0.rawValue) }),
          "limitations": .string("后台操作取决于目标应用提供的辅助功能动作，不支持的控件会报错；交互选区和前台输入会显示在屏幕上。")]
     }
 
-    public func context(targetPID: pid_t? = nil) throws -> [String: JSONValue] {
-        guard let pid = targetPID ?? frontmostPID(), let app = application(pid) else {
+    public func context(targetPID: pid_t? = nil, targetID: String? = nil, pinTarget: Bool = false) throws -> [String: JSONValue] {
+        let existingTarget = try targetID.map { try invocationTarget($0, pid: targetPID) }
+        if let existingTarget, existingTarget.window == nil && existingTarget.windowInfo == nil {
+            throw DesktopAutomationError.unavailable("唤起时没有可在后台读取的窗口，请使用已保存的桌面快照")
+        }
+        guard let pid = existingTarget?.app.pid ?? targetPID ?? frontmostPID(), let app = application(pid) else {
             throw DesktopAutomationError.unavailable("目标应用已经退出或没有前台应用")
         }
         elements.removeAll()
@@ -242,13 +297,33 @@ public final class DesktopAutomation {
         snapshotDate = Date()
         var result: [String: JSONValue] = ["pid": .number(Double(pid)), "appName": .string(app.name),
             "bundleId": app.bundleIdentifier.map(JSONValue.string) ?? .null, "accessibilityGranted": .bool(accessibility.trusted)]
+        let root = accessibility.trusted ? accessibility.root(pid: pid) : nil
+        let focused = existingTarget == nil ? root.flatMap { accessibility.attribute(kAXFocusedWindowAttribute, of: $0) } : nil
+        let focusedWindow = focused.flatMap { CFGetTypeID($0) == AXUIElementGetTypeID() ? unsafeDowncast($0, to: AXUIElement.self) : nil }
+        var pinnedID = targetID
+        if pinTarget {
+            let info: DesktopWindowInfo?
+            do { info = try windowInfo(pid: pid, window: focusedWindow) }
+            catch { info = nil; result["warning"] = .string(error.localizedDescription) }
+            if invocationTargets.count >= 32, let oldest = invocationTargets.min(by: { $0.value.createdAt < $1.value.createdAt })?.key {
+                invocationTargets.removeValue(forKey: oldest)
+            }
+            let id = UUID().uuidString
+            pinnedID = id
+            invocationTargets[id] = InvocationTarget(app: app, window: focusedWindow, windowInfo: info)
+            if focusedWindow != nil && info == nil { result["windowId"] = .null }
+        }
+        let target = pinnedID.flatMap { invocationTargets[$0] }
+        if let pinnedID { result["targetId"] = .string(pinnedID) }
+        if let info = target?.windowInfo {
+            result["windowId"] = .number(Double(info.id))
+            if let title = info.title { result["title"] = .string(String(title.prefix(1000))) }
+        }
         guard accessibility.trusted else {
-            result["warning"] = .string("未授予辅助功能权限，只包含应用信息。")
+            if result["warning"] == nil { result["warning"] = .string("未授予辅助功能权限，只包含应用信息。") }
             return result
         }
-        let root = accessibility.root(pid: pid)
-        if let focused = accessibility.attribute(kAXFocusedWindowAttribute, of: root), CFGetTypeID(focused) == AXUIElementGetTypeID() {
-            let window = unsafeDowncast(focused, to: AXUIElement.self)
+        if let window = target?.window ?? focusedWindow {
             if let title = accessibility.attribute(kAXTitleAttribute, of: window) as? String {
                 result["title"] = .string(String(title.prefix(1000)))
             }
@@ -257,13 +332,73 @@ public final class DesktopAutomation {
         var remainingCharacters = 20_000
         var truncated = false
         let deadline = Date().addingTimeInterval(2)
-        if let tree = snapshotElement(root, snapshot: snapshot, depth: 0, remainingCharacters: &remainingCharacters, truncated: &truncated, deadline: deadline) {
+        // 固定原窗口的 AX 引用，其他窗口或应用的上下文采集不能替换本轮目标。
+        if let snapshotRoot = target?.window ?? (target == nil || target?.windowInfo == nil ? root : nil),
+           let tree = snapshotElement(snapshotRoot, snapshot: snapshot, depth: 0, remainingCharacters: &remainingCharacters, truncated: &truncated, deadline: deadline) {
             result["tree"] = .object(tree)
         }
         result["snapshotId"] = .string(snapshot)
         result["truncated"] = .bool(truncated)
         result["elementCount"] = .number(Double(elements.count))
+        if let pinnedID {
+            invocationTargets[pinnedID]?.elements = elements
+            invocationTargets[pinnedID]?.elementDate = snapshotDate
+        }
         return result
+    }
+
+    private static func applicationWindows(_ pid: pid_t) -> [DesktopWindowInfo] {
+        (CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]] ?? []).compactMap { info in
+            guard (info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == pid,
+                  (info[kCGWindowLayer as String] as? NSNumber)?.intValue == 0,
+                  let id = (info[kCGWindowNumber as String] as? NSNumber)?.uint32Value,
+                  let bounds = info[kCGWindowBounds as String] as? [String: Any],
+                  let frame = CGRect(dictionaryRepresentation: bounds as CFDictionary), frame.width > 30, frame.height > 30 else { return nil }
+            return DesktopWindowInfo(id: id, title: info[kCGWindowName as String] as? String, frame: frame)
+        }
+    }
+
+    private func windowInfo(pid: pid_t, window: AXUIElement?) throws -> DesktopWindowInfo? {
+        let candidates = windows(pid)
+        guard let window else {
+            if candidates.isEmpty { return nil }
+            guard candidates.count == 1 else { throw DesktopAutomationError.unavailable("无法确定唤起时的窗口，请检查辅助功能权限") }
+            return candidates[0]
+        }
+        let title = accessibility.attribute(kAXTitleAttribute, of: window) as? String
+        var matches = candidates
+        if let position = accessibility.attribute(kAXPositionAttribute, of: window), CFGetTypeID(position) == AXValueGetTypeID(),
+           let size = accessibility.attribute(kAXSizeAttribute, of: window), CFGetTypeID(size) == AXValueGetTypeID() {
+            var point = CGPoint.zero
+            var dimensions = CGSize.zero
+            if AXValueGetValue(unsafeDowncast(position, to: AXValue.self), .cgPoint, &point),
+               AXValueGetValue(unsafeDowncast(size, to: AXValue.self), .cgSize, &dimensions) {
+                matches = matches.filter { abs($0.frame.minX - point.x) < 2 && abs($0.frame.minY - point.y) < 2
+                    && abs($0.frame.width - dimensions.width) < 2 && abs($0.frame.height - dimensions.height) < 2 }
+            }
+        }
+        if matches.count > 1 || matches.count == candidates.count {
+            let titled = matches.filter { $0.title == title && title != nil }
+            if !titled.isEmpty { matches = titled }
+        }
+        guard matches.count == 1 else { throw DesktopAutomationError.unavailable("无法唯一定位唤起时的窗口") }
+        return matches[0]
+    }
+
+    private func invocationTarget(_ id: String, pid: pid_t?) throws -> InvocationTarget {
+        guard let target = invocationTargets[id], let app = application(target.app.pid),
+              app.bundleIdentifier == target.app.bundleIdentifier, app.launchDate == target.app.launchDate else {
+            throw DesktopAutomationError.unavailable("唤起时的目标应用已退出或快照已释放")
+        }
+        if let pid, pid != target.app.pid { throw DesktopAutomationError.invalidArguments("快照不属于指定 pid") }
+        if let info = target.windowInfo, !windows(target.app.pid).contains(where: { $0.id == info.id }) {
+            throw DesktopAutomationError.unavailable("唤起时的目标窗口已经关闭")
+        }
+        if accessibility.trusted, let window = target.window,
+           accessibility.attribute(kAXRoleAttribute, of: window) as? String != kAXWindowRole {
+            throw DesktopAutomationError.unavailable("唤起时的目标窗口已经失效")
+        }
+        return target
     }
 
     private func snapshotElement(_ element: AXUIElement, snapshot: String, depth: Int, remainingCharacters: inout Int, truncated: inout Bool, deadline: Date) -> [String: JSONValue]? {
@@ -305,15 +440,17 @@ public final class DesktopAutomation {
         return subrole == kAXSecureTextFieldSubrole || (accessibility.attribute("AXProtectedContent", of: element) as? Bool == true)
     }
 
-    private func resolveElement(_ arguments: [String: JSONValue]) throws -> AXUIElement {
-        guard let id = arguments["elementId"]?.string, let element = elements[id],
-              let pid = snapshotPID, Date().timeIntervalSince(snapshotDate) < 60,
+    private func resolveElement(_ arguments: [String: JSONValue]) throws -> (AXUIElement, pid_t) {
+        let requestedPID = try Self.pid(arguments["pid"])
+        let target = try arguments["targetId"]?.string.map { try invocationTarget($0, pid: requestedPID) }
+        guard let id = arguments["elementId"]?.string, let element = (target?.elements ?? elements)[id],
+              let pid = target?.app.pid ?? snapshotPID, Date().timeIntervalSince(target?.elementDate ?? snapshotDate) < 60,
               application(pid) != nil else { throw DesktopAutomationError.staleElement }
-        if let requestedPID = try Self.pid(arguments["pid"]), requestedPID != pid {
+        if let requestedPID, requestedPID != pid {
             throw DesktopAutomationError.invalidArguments("elementId 不属于指定 pid")
         }
         guard !isSecure(element) else { throw DesktopAutomationError.unsupported("不操作密码或受保护的输入框") }
-        return element
+        return (element, pid)
     }
 
     private func checkAX(_ error: AXError) throws {
@@ -324,29 +461,47 @@ public final class DesktopAutomation {
         }
     }
 
-    public func capture(mode: DesktopCaptureMode = .region, targetPID: pid_t? = nil, includeContext: Bool = true, region: CGRect? = nil) async throws -> DesktopCapture {
+    func captureInvocationImage(pid: pid_t, context: [String: JSONValue]) async throws -> DesktopCapture {
+        guard let id = context["targetId"]?.string else { throw DesktopAutomationError.unavailable("未能固定唤起时的应用") }
+        if context["windowId"] != nil {
+            return try await capture(mode: .window, targetPID: pid, targetID: id, includeContext: false)
+        }
+        guard windows(pid).isEmpty else { throw DesktopAutomationError.unavailable("无法确定唤起时的原窗口，无法保存画面") }
+        guard frontmostPID() == pid else { throw DesktopAutomationError.unavailable("唤起时的桌面已经切换，无法保存原画面") }
+        let capture = try await capture(mode: .screen, targetPID: pid, includeContext: false)
+        guard frontmostPID() == pid, windows(pid).isEmpty else { throw DesktopAutomationError.unavailable("采集期间桌面已经切换，无法保存原画面") }
+        return capture
+    }
+
+    public func capture(mode: DesktopCaptureMode = .region, targetPID: pid_t? = nil, targetID: String? = nil, includeContext: Bool = true, region: CGRect? = nil) async throws -> DesktopCapture {
         guard !captureInProgress else { throw DesktopAutomationError.unavailable("已有截图正在进行") }
-        guard CGPreflightScreenCaptureAccess() else { throw DesktopAutomationError.permissionDenied("屏幕录制权限") }
-        let pid = targetPID ?? frontmostPID()
+        guard screenCaptureAllowed() else { throw DesktopAutomationError.permissionDenied("屏幕录制权限") }
+        let target = try targetID.map { try invocationTarget($0, pid: targetPID) }
+        if targetID != nil && (mode != .window || target?.windowInfo == nil) {
+            throw DesktopAutomationError.unavailable("后台快照只能读取唤起时已固定的窗口")
+        }
+        let pid = target?.app.pid ?? targetPID ?? frontmostPID()
         guard let pid, application(pid) != nil else { throw DesktopAutomationError.unavailable("目标应用已经退出或没有前台应用") }
         captureInProgress = true
         defer { captureInProgress = false }
         try Task.checkCancellation()
-        var appContext = includeContext ? try context(targetPID: pid) : ["pid": .number(Double(pid))]
+        var appContext = includeContext ? try context(targetPID: pid, targetID: targetID) : ["pid": .number(Double(pid))]
         let image: CGImage
         if mode == .region && region == nil {
             image = try await interactiveRegion()
         } else {
-            image = try await captureImage(mode: mode, pid: pid, region: region)
+            if let imageCapture { image = try await imageCapture(mode, pid, target?.windowInfo?.id, region) }
+            else { image = try await captureImage(mode: mode, pid: pid, windowID: target?.windowInfo?.id, region: region) }
         }
         try Task.checkCancellation()
+        if let targetID { _ = try invocationTarget(targetID, pid: pid) }
         let data = try Self.compress(image)
         appContext["capturedAt"] = .string(ISO8601DateFormatter().string(from: Date()))
         appContext["coordinateSpace"] = .string("global-top-left-points")
         return DesktopCapture(imageData: data, mimeType: "image/jpeg", context: appContext, mode: mode)
     }
 
-    private func captureImage(mode: DesktopCaptureMode, pid: pid_t, region: CGRect?) async throws -> CGImage {
+    private func captureImage(mode: DesktopCaptureMode, pid: pid_t, windowID: CGWindowID?, region: CGRect?) async throws -> CGImage {
         let content: SCShareableContent = try await captureOperation { complete in
             SCShareableContent.getExcludingDesktopWindows(true, onScreenWindowsOnly: false) { content, error in
                 if let content { complete(.success(content)) }
@@ -358,7 +513,10 @@ public final class DesktopAutomation {
         let candidates = content.windows.filter { $0.owningApplication?.processID == pid && $0.windowLayer == 0 && $0.frame.width > 30 && $0.frame.height > 30 }
         let orderedIDs = (CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] ?? [])
             .compactMap { $0[kCGWindowNumber as String] as? CGWindowID }
-        let window = candidates.min { (orderedIDs.firstIndex(of: $0.windowID) ?? Int.max) < (orderedIDs.firstIndex(of: $1.windowID) ?? Int.max) }
+        let window: SCWindow?
+        if let windowID { window = candidates.first { $0.windowID == windowID } }
+        else { window = candidates.min { (orderedIDs.firstIndex(of: $0.windowID) ?? Int.max) < (orderedIDs.firstIndex(of: $1.windowID) ?? Int.max) } }
+        if let windowID, window?.windowID != windowID { throw DesktopAutomationError.unavailable("唤起时的目标窗口已经关闭或不可捕获") }
         let configuration = SCStreamConfiguration()
         configuration.showsCursor = false
         configuration.capturesAudio = false
@@ -526,7 +684,8 @@ public final class DesktopAutomation {
                 event.post(tap: .cghidEventTap)
             }
         }
-        return ["performed": .bool(true), "background": .bool(false), "action": .string(action), "pid": .number(Double(pid))]
+        return ["performed": .bool(true), "background": .bool(false), "action": .string(action), "pid": .number(Double(pid)),
+                "appName": .string(app.localizedName ?? "未知应用"), "bundleId": app.bundleIdentifier.map(JSONValue.string) ?? .null]
     }
 
     static func number(_ value: JSONValue?) -> Double? {

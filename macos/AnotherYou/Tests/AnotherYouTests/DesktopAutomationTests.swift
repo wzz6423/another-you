@@ -17,6 +17,21 @@ private final class FakeDesktopAccessibility: DesktopAccessibility {
     var written: [String] = []
     var result = AXError.success
     var reads: [(CFHashCode, String)] = []
+    let firstWindow = AXUIElementCreateApplication(1004)
+    let secondWindow = AXUIElementCreateApplication(1005)
+    let secondField = AXUIElementCreateApplication(1006)
+    var windowInfos: [DesktopWindowInfo] = []
+
+    func addWindows() {
+        attributes[CFHash(app)]?[kAXFocusedWindowAttribute] = firstWindow
+        attributes[CFHash(firstWindow)] = [kAXRoleAttribute: kAXWindowRole, kAXTitleAttribute: "原窗口"]
+        attributes[CFHash(secondWindow)] = [kAXRoleAttribute: kAXWindowRole, kAXTitleAttribute: "后来切换的窗口"]
+        attributes[CFHash(secondField)] = [kAXRoleAttribute: kAXTextFieldRole, kAXValueAttribute: "其他窗口内容"]
+        descendants[CFHash(firstWindow)] = [field, secureField]
+        descendants[CFHash(secondWindow)] = [secondField]
+        windowInfos = [DesktopWindowInfo(id: 101, title: "原窗口", frame: CGRect(x: 10, y: 10, width: 400, height: 300)),
+                       DesktopWindowInfo(id: 102, title: "后来切换的窗口", frame: CGRect(x: 50, y: 50, width: 400, height: 300))]
+    }
 
     init() {
         attributes[CFHash(app)] = [kAXRoleAttribute: kAXApplicationRole, kAXTitleAttribute: "测试应用"]
@@ -42,11 +57,190 @@ final class DesktopAutomationTests: XCTestCase {
     private func automation(_ fake: FakeDesktopAccessibility, exists: Bool = true) -> DesktopAutomation {
         DesktopAutomation(accessibility: fake, application: { pid in
             exists ? DesktopApplicationInfo(pid: pid, name: "测试应用", bundleIdentifier: "test.desktop") : nil
-        }, frontmostPID: { 1001 })
+        }, frontmostPID: { 1001 }, windows: { _ in fake.windowInfos })
     }
 
     private func fieldID(_ context: [String: JSONValue]) throws -> String {
         try XCTUnwrap(context["tree"]?.object?["children"]?.array?.first?.object?["elementId"]?.string)
+    }
+
+    func testPinnedSnapshotRefreshReadsOriginalWindowAfterSwitchingAppAndWindow() async throws {
+        let fake = FakeDesktopAccessibility()
+        fake.addWindows()
+        var frontmost: pid_t = 1001
+        let desktop = DesktopAutomation(accessibility: fake, application: { pid in
+            DesktopApplicationInfo(pid: pid, name: "测试应用", bundleIdentifier: "test.desktop")
+        }, frontmostPID: { frontmost }, windows: { _ in fake.windowInfos })
+        let initial = try desktop.context(pinTarget: true)
+        let target = try XCTUnwrap(initial["targetId"]?.string)
+        XCTAssertEqual(initial["windowId"], .number(101))
+        XCTAssertEqual(initial["tree"]?.object?["role"], .string(kAXWindowRole))
+        fake.attributes[CFHash(fake.app)]?[kAXFocusedWindowAttribute] = fake.secondWindow
+        fake.attributes[CFHash(fake.field)]?[kAXValueAttribute] = "原窗口更新后的内容"
+        frontmost = 9999
+        fake.reads.removeAll()
+        let refreshed = try await desktop.handle(["action": .string("context"), "targetId": .string(target), "pid": .number(1001)])
+        XCTAssertEqual(refreshed["windowId"], .number(101))
+        XCTAssertEqual(refreshed["title"], .string("原窗口"))
+        XCTAssertEqual(refreshed["tree"]?.object?["children"]?.array?.first?.object?["value"], .string("原窗口更新后的内容"))
+        XCTAssertEqual(initial["tree"]?.object?["children"]?.array?.first?.object?["value"], .string("用户内容"))
+        XCTAssertFalse(fake.reads.contains { $0.0 == CFHash(fake.secondWindow) || $0.0 == CFHash(fake.secondField) })
+        XCTAssertEqual(frontmost, 9999)
+    }
+
+    func testPinnedElementCachesRemainIndependentAcrossInvocationsAndLiveContext() async throws {
+        let fake = FakeDesktopAccessibility()
+        fake.addWindows()
+        let desktop = automation(fake)
+        let first = try desktop.context(pinTarget: true)
+        fake.attributes[CFHash(fake.app)]?[kAXFocusedWindowAttribute] = fake.secondWindow
+        let second = try desktop.context(pinTarget: true)
+        _ = try desktop.context()
+        for snapshot in [first, second] {
+            let receipt = try await desktop.handle(["action": .string("press"), "targetId": snapshot["targetId"]!,
+                                                    "pid": .number(1001), "elementId": .string(try fieldID(snapshot))])
+            XCTAssertEqual(receipt["performed"], .bool(true))
+        }
+        do {
+            _ = try await desktop.handle(["action": .string("press"), "targetId": second["targetId"]!, "elementId": .string(try fieldID(first))])
+            XCTFail("不能用另一个窗口的控件引用")
+        } catch let error as DesktopAutomationError { XCTAssertEqual(error, .staleElement) }
+        XCTAssertEqual(fake.performed.count, 2)
+    }
+
+    func testClosedWindowAndRestartedApplicationRejectRefreshWithoutFallback() throws {
+        let fake = FakeDesktopAccessibility()
+        fake.addWindows()
+        var launch = Date(timeIntervalSince1970: 1)
+        let desktop = DesktopAutomation(accessibility: fake, application: { pid in
+            DesktopApplicationInfo(pid: pid, name: "测试应用", bundleIdentifier: "test.desktop", launchDate: launch)
+        }, frontmostPID: { 1001 }, windows: { _ in fake.windowInfos })
+        let initial = try desktop.context(pinTarget: true)
+        let target = try XCTUnwrap(initial["targetId"]?.string)
+        fake.windowInfos.removeFirst()
+        XCTAssertThrowsError(try desktop.context(targetID: target))
+        fake.addWindows()
+        launch = Date(timeIntervalSince1970: 2)
+        XCTAssertThrowsError(try desktop.context(targetID: target))
+        XCTAssertThrowsError(try desktop.context(targetPID: 9999, targetID: target))
+    }
+
+    func testIdenticalTitlesUseWindowGeometryAndAmbiguousMatchesDoNotPickAnotherWindow() throws {
+        let fake = FakeDesktopAccessibility()
+        fake.addWindows()
+        fake.windowInfos[1] = DesktopWindowInfo(id: 102, title: "原窗口", frame: CGRect(x: 50, y: 50, width: 400, height: 300))
+        var point = CGPoint(x: 10, y: 10)
+        var size = CGSize(width: 400, height: 300)
+        fake.attributes[CFHash(fake.firstWindow)]?[kAXPositionAttribute] = AXValueCreate(.cgPoint, &point)
+        fake.attributes[CFHash(fake.firstWindow)]?[kAXSizeAttribute] = AXValueCreate(.cgSize, &size)
+        let desktop = automation(fake)
+        XCTAssertEqual(try desktop.context(pinTarget: true)["windowId"], .number(101))
+        fake.attributes[CFHash(fake.firstWindow)]?.removeValue(forKey: kAXPositionAttribute)
+        fake.attributes[CFHash(fake.firstWindow)]?.removeValue(forKey: kAXSizeAttribute)
+        let ambiguous = try desktop.context(pinTarget: true)
+        XCTAssertEqual(ambiguous["windowId"], .null)
+        XCTAssertNotNil(ambiguous["warning"])
+        XCTAssertEqual(ambiguous["tree"]?.object?["children"]?.array?.first?.object?["value"], .string("用户内容"))
+    }
+
+    func testPinnedWindowWithoutAccessibilityKeepsMetadataAndDoesNotReadControls() throws {
+        let fake = FakeDesktopAccessibility()
+        fake.addWindows()
+        fake.trusted = false
+        fake.windowInfos.removeLast()
+        let desktop = automation(fake)
+        let initial = try desktop.context(pinTarget: true)
+        let target = try XCTUnwrap(initial["targetId"]?.string)
+        XCTAssertEqual(initial["windowId"], .number(101))
+        XCTAssertNil(initial["tree"])
+        XCTAssertEqual(try desktop.context(targetID: target)["windowId"], .number(101))
+        XCTAssertTrue(fake.reads.isEmpty)
+    }
+
+    func testMultipleWindowsWithoutAccessibilityDoNotGuessTheInvocationWindow() throws {
+        let fake = FakeDesktopAccessibility()
+        fake.addWindows()
+        fake.trusted = false
+        let desktop = automation(fake)
+        let initial = try desktop.context(pinTarget: true)
+        let target = try XCTUnwrap(initial["targetId"]?.string)
+        XCTAssertNil(initial["windowId"])
+        XCTAssertNotNil(initial["warning"])
+        XCTAssertThrowsError(try desktop.context(targetID: target))
+        XCTAssertTrue(fake.reads.isEmpty)
+    }
+
+    func testPinnedScreenshotUsesOriginalWindowIDAndRejectsClosureDuringCapture() async throws {
+        let fake = FakeDesktopAccessibility()
+        fake.addWindows()
+        let bitmap = try XCTUnwrap(CGContext(data: nil, width: 40, height: 40, bitsPerComponent: 8, bytesPerRow: 0,
+                                             space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue))
+        let image = try XCTUnwrap(bitmap.makeImage())
+        var requestedWindows: [CGWindowID?] = []
+        var closeDuringCapture = false
+        let desktop = DesktopAutomation(accessibility: fake, application: { pid in
+            DesktopApplicationInfo(pid: pid, name: "测试应用", bundleIdentifier: "test.desktop")
+        }, frontmostPID: { 9999 }, windows: { _ in fake.windowInfos }, screenCaptureAllowed: { true }, imageCapture: { mode, pid, windowID, _ in
+            XCTAssertEqual(mode, .window)
+            XCTAssertEqual(pid, 1001)
+            requestedWindows.append(windowID)
+            if closeDuringCapture { fake.windowInfos.removeFirst() }
+            await Task.yield()
+            return image
+        })
+        let initial = try desktop.context(targetPID: 1001, pinTarget: true)
+        let target = try XCTUnwrap(initial["targetId"]?.string)
+        fake.attributes[CFHash(fake.app)]?[kAXFocusedWindowAttribute] = fake.secondWindow
+        let capture = try await desktop.capture(mode: .window, targetID: target)
+        XCTAssertEqual(capture.context["windowId"], .number(101))
+        XCTAssertEqual(capture.context["title"], .string("原窗口"))
+        XCTAssertEqual(requestedWindows, [101])
+        closeDuringCapture = true
+        do { _ = try await desktop.capture(mode: .window, targetID: target); XCTFail("截图期间关闭原窗口必须失败") }
+        catch is DesktopAutomationError { }
+        XCTAssertEqual(requestedWindows, [101, 101])
+        do { _ = try await desktop.capture(mode: .screen, targetID: target); XCTFail("不能回退当前屏幕") }
+        catch is DesktopAutomationError { }
+        XCTAssertEqual(requestedWindows.count, 2)
+    }
+
+    func testFullSnapshotKeepsAXContentWhenScreenshotPermissionIsMissing() async throws {
+        let fake = FakeDesktopAccessibility()
+        fake.addWindows()
+        let desktop = DesktopAutomation(accessibility: fake, application: { pid in
+            DesktopApplicationInfo(pid: pid, name: "测试应用", bundleIdentifier: "test.desktop")
+        }, frontmostPID: { 1001 }, windows: { _ in fake.windowInfos }, screenCaptureAllowed: { false })
+        let initial = try desktop.context(pinTarget: true)
+        let result = try await desktop.handle(["action": .string("snapshot"), "targetId": initial["targetId"]!])
+        XCTAssertEqual(result["context"]?.object?["windowId"], .number(101))
+        XCTAssertEqual(result["context"]?.object?["tree"]?.object?["children"]?.array?.first?.object?["value"], .string("用户内容"))
+        XCTAssertNotNil(result["screenshotError"])
+        XCTAssertNil(result["image"])
+    }
+
+    func testSessionCaptureAndBackgroundRepliesSharePinnedTargetRegistry() async throws {
+        let fake = FakeDesktopAccessibility()
+        fake.addWindows()
+        let desktop = automation(fake)
+        var captureContext: [String: JSONValue] = [:]
+        let session = DesktopSession(capture: { mode, _ in DesktopCapture(imageData: Data([255, 216, 255]), mimeType: "image/jpeg", context: [:], mode: mode) },
+                                     snapshotCapture: { _, context in
+            captureContext = context
+            return DesktopCapture(imageData: Data([255, 216, 255]), mimeType: "image/jpeg", context: [:], mode: .window)
+        }, frontmostPID: { 1001 }, desktop: desktop)
+        let initial = await session.prepareInvocationSnapshot().value
+        let context = try XCTUnwrap(initial["context"]?.object)
+        XCTAssertEqual(captureContext["targetId"], context["targetId"])
+        XCTAssertEqual(captureContext["windowId"], .number(101))
+        fake.attributes[CFHash(fake.app)]?[kAXFocusedWindowAttribute] = fake.secondWindow
+        let event = AgentEvent(id: "request", occurredAt: "2026-10-07T10:00:00Z", kind: "desktop.request", source: "agent",
+                               payload: ["requestId": .string("background"), "arguments": .object(["action": .string("context"), "pid": .number(1001), "targetId": context["targetId"]!])])
+        var reply: [String: JSONValue]?
+        session.handle(event) { reply = $0 }
+        for _ in 0..<100 where reply == nil { try await Task.sleep(for: .milliseconds(5)) }
+        XCTAssertNil(reply?["error"])
+        XCTAssertEqual(reply?["result"]?.object?["windowId"], .number(101))
+        XCTAssertEqual(reply?["result"]?.object?["title"], .string("原窗口"))
     }
 
     func testContextReadsOnlyRequestedAppAndExcludesSecureValues() throws {
@@ -98,6 +292,9 @@ final class DesktopAutomationTests: XCTestCase {
             let result = try await desktop.handle(["action": .string(action), "elementId": .string(id), "value": .string("新内容"), "direction": .string("down")])
             XCTAssertEqual(result["background"], .bool(true))
             XCTAssertEqual(result["performed"], .bool(true))
+            XCTAssertEqual(result["pid"], .number(1001))
+            XCTAssertEqual(result["appName"], .string("测试应用"))
+            XCTAssertEqual(result["bundleId"], .string("test.desktop"))
         }
         XCTAssertEqual(fake.performed, [kAXPressAction, "AXScrollDown"])
         XCTAssertEqual(fake.written, ["新内容"])

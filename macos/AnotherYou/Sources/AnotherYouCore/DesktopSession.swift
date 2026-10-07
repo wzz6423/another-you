@@ -15,26 +15,41 @@ public struct ScreenAttachment: Identifiable, Sendable, Equatable {
 public final class DesktopSession: ObservableObject {
     @Published public private(set) var attachments: [ScreenAttachment] = []
     @Published public private(set) var isCapturing = false
+    @Published public private(set) var isPreparingSnapshot = false
     @Published public private(set) var error: String?
     @Published public private(set) var activity: String?
     @Published public var allowForeground = false
     @Published public private(set) var permissions: [String: JSONValue] = [:]
     var canStartOperation: () -> Bool = { true }
-    private let desktop = DesktopAutomation()
+    private let desktop: DesktopAutomation
     private let captureImage: (DesktopCaptureMode, pid_t?) async throws -> DesktopCapture
+    private let captureSnapshotImage: (pid_t, [String: JSONValue]) async throws -> DesktopCapture
+    private let readContext: (pid_t) throws -> [String: JSONValue]
+    private let frontmostPID: () -> pid_t?
     private var lastExternalPID: pid_t?
     private var activationObserver: AnyCancellable?
     private var captureTask: Task<Void, Never>?
+    private var snapshotTask: Task<[String: JSONValue], Never>?
+    private var snapshotGeneration = UUID()
     private var operations: [String: Task<Void, Never>] = [:]
     private var generation = UUID()
 
     public convenience init() {
         let service = DesktopAutomation()
-        self.init(capture: { mode, pid in try await service.capture(mode: mode, targetPID: pid) })
+        self.init(capture: { mode, pid in try await service.capture(mode: mode, targetPID: pid) },
+                  snapshotCapture: { pid, context in try await service.captureInvocationImage(pid: pid, context: context) }, desktop: service)
     }
 
-    init(capture: @escaping (DesktopCaptureMode, pid_t?) async throws -> DesktopCapture) {
+    init(capture: @escaping (DesktopCaptureMode, pid_t?) async throws -> DesktopCapture,
+         snapshotCapture: ((pid_t, [String: JSONValue]) async throws -> DesktopCapture)? = nil,
+         context: ((pid_t) throws -> [String: JSONValue])? = nil,
+         frontmostPID: @escaping () -> pid_t? = { DesktopAutomation.frontmostApplicationPID },
+         desktop: DesktopAutomation = DesktopAutomation()) {
+        self.desktop = desktop
         captureImage = capture
+        captureSnapshotImage = snapshotCapture ?? { pid, context in try await capture(context["windowId"] == nil ? .screen : .window, pid) }
+        readContext = context ?? { pid in try desktop.context(targetPID: pid, pinTarget: true) }
+        self.frontmostPID = frontmostPID
         rememberCurrentApplication()
         permissions = desktop.capabilities
         activationObserver = NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didActivateApplicationNotification)
@@ -48,7 +63,45 @@ public final class DesktopSession: ObservableObject {
     }
 
     public func rememberCurrentApplication() {
-        if let pid = DesktopAutomation.frontmostApplicationPID, pid != ProcessInfo.processInfo.processIdentifier { lastExternalPID = pid }
+        if let pid = frontmostPID(), pid != ProcessInfo.processInfo.processIdentifier { lastExternalPID = pid }
+    }
+
+    func prepareInvocationSnapshot() -> Task<[String: JSONValue], Never> {
+        snapshotTask?.cancel()
+        let current = UUID()
+        snapshotGeneration = current
+        isPreparingSnapshot = true
+        rememberCurrentApplication()
+        let pid = lastExternalPID
+        var snapshot: [String: JSONValue] = ["capturedAt": .string(ISO8601DateFormatter().string(from: Date())), "context": .object([:])]
+        let canCapture = canStartOperation() && pid != nil
+        if canCapture, let pid {
+            do { snapshot["context"] = .object(try readContext(pid)) }
+            catch { snapshot["contextError"] = .string(String(error.localizedDescription.prefix(2000))) }
+        } else {
+            let error = DesktopAutomationError.unavailable("唤起输入框时无法采集目标应用").localizedDescription
+            snapshot["contextError"] = .string(error)
+            snapshot["screenshotError"] = .string(error)
+        }
+        let initial = snapshot
+        let task = Task { [weak self] in
+            guard let self else { return initial }
+            defer {
+                if snapshotGeneration == current { isPreparingSnapshot = false; snapshotTask = nil }
+            }
+            var result = initial
+            guard canCapture, let pid else { return result }
+            do {
+                try Task.checkCancellation()
+                let capture = try await captureSnapshotImage(pid, initial["context"]?.object ?? [:])
+                try Task.checkCancellation()
+                result["image"] = capture.json["image"]
+                result["mode"] = .string(capture.mode.rawValue)
+            } catch { result["screenshotError"] = .string(String(error.localizedDescription.prefix(2000))) }
+            return result
+        }
+        snapshotTask = task
+        return task
     }
 
     public func capture(_ mode: DesktopCaptureMode, completion: (@MainActor () -> Void)? = nil) {
@@ -130,6 +183,7 @@ public final class DesktopSession: ObservableObject {
     public func cancel() {
         generation = UUID()
         captureTask?.cancel()
+        snapshotTask?.cancel()
         for operation in operations.values { operation.cancel() }
         operations.removeAll()
         activity = nil
@@ -170,10 +224,10 @@ public struct DesktopSettingsView: View {
     public init(session: DesktopSession) { self.session = session }
 
     public var body: some View {
-        Section(AppLocalization.text("截图与电脑操作")) {
+        Section(AppLocalization.text("电脑操作")) {
             DesktopPermissionRow(session: session, permission: "screenRecording", title: "屏幕录制")
             DesktopPermissionRow(session: session, permission: "accessibility", title: "辅助功能")
-            Text(AppLocalization.text("截图会附带应用上下文，预览后随消息发送。浏览器使用独立后台会话；电脑后台操作取决于应用支持。"))
+            Text(AppLocalization.text("读取应用内容、截图并操作控件。前台控制可在会话中单独允许。"))
                 .font(.caption).foregroundStyle(.secondary)
             if let error = session.error { Text(AppLocalization.text(error)).font(.caption).foregroundStyle(.red) }
         }

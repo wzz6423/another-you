@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
-import { createAgentEvent, encodeEvent, AgentCore, createDefaultConfig, type AgentEvent, type ConversationSession, type PiAgentBackend, type PiRequest } from "../src/index.ts";
+import { createAgentEvent, encodeEvent, AgentCore, createDefaultConfig, type AgentEvent, type ConversationSession, type Proposal, type PersistedState, type PiAgentBackend, type PiRequest } from "../src/index.ts";
 
 async function fixture(t: TestContext, run: (request: PiRequest) => Promise<{ text: string }> = async () => ({ text: "回答" })) {
   const directory = await mkdtemp(join(tmpdir(), "another-you-conversations-"));
@@ -13,6 +13,149 @@ async function fixture(t: TestContext, run: (request: PiRequest) => Promise<{ te
   return { config, backend, directory, core: new AgentCore({ config, backend, rules: [] }) };
 }
 function sessions(core: AgentCore): ConversationSession[] { return core.status().conversations as ConversationSession[]; }
+function proposals(core: AgentCore): Proposal[] { return core.status().proposals as Proposal[]; }
+
+test("会话和建议置顶、取消置顶跨重启保留，归档与置顶互不改变", async t => {
+  const { core, config, backend } = await fixture(t);
+  await core.prompt("pin-turn", "置顶会话", undefined, false, "session");
+  core.addRule({ id: "pin-rule", type: "event", eventName: "pin-fixture", title: "置顶建议", message: "待执行", cooldownMs: 0 });
+  const suggestion = core.signal({ type: "event", name: "pin-fixture" })[0];
+  const ids = ["session", suggestion.id];
+  const updatedAt = sessions(core)[0].updatedAt;
+  const events: AgentEvent[] = [];
+  core.events.subscribe(event => events.push(event));
+  for (const id of ids) core.manageConversation(id, "pin");
+  assert.deepEqual(events.map(event => [event.kind, event.payload.action, event.payload.conversationId]), ids.map(id => ["conversation.updated", "pin", id]));
+  const pinned = new AgentCore({ config, backend, rules: [] });
+  for (const item of [...sessions(pinned), ...proposals(pinned)]) {
+    assert.equal(item.pinned, true);
+    assert.equal(item.archived ?? false, false);
+  }
+  assert.equal(sessions(pinned)[0].updatedAt, updatedAt);
+  for (const id of ids) pinned.manageConversation(id, "archive");
+  const archived = new AgentCore({ config, backend, rules: [] });
+  for (const item of [...sessions(archived), ...proposals(archived)]) {
+    assert.equal(item.archived, true);
+    assert.equal(item.pinned, true);
+  }
+  for (const id of ids) archived.manageConversation(id, "unpin");
+  const unpinned = new AgentCore({ config, backend, rules: [] });
+  for (const item of [...sessions(unpinned), ...proposals(unpinned)]) {
+    assert.equal(item.pinned, false);
+    assert.equal(item.archived, true);
+  }
+  assert.equal(sessions(unpinned)[0].updatedAt, updatedAt);
+  for (const id of ids) unpinned.manageConversation(id, "unarchive");
+  const restored = new AgentCore({ config, backend, rules: [] });
+  for (const item of [...sessions(restored), ...proposals(restored)]) {
+    assert.equal(item.archived, false);
+    assert.equal(item.pinned, false);
+  }
+});
+
+test("旧存档缺少 pinned 时会话与建议默认为未置顶，仍可置顶", async t => {
+  const { core, config, backend, directory } = await fixture(t);
+  await core.prompt("legacy-turn", "历史会话", undefined, false, "legacy");
+  core.addRule({ id: "legacy-rule", type: "event", eventName: "legacy-fixture", title: "历史建议", message: "待执行", cooldownMs: 0 });
+  const suggestion = core.signal({ type: "event", name: "legacy-fixture" })[0];
+  const path = join(directory, "state.json");
+  const saved = JSON.parse(await readFile(path, "utf8")) as PersistedState;
+  for (const item of [...saved.conversations!, ...saved.proposals]) delete item.pinned;
+  await writeFile(path, JSON.stringify(saved));
+  const restored = new AgentCore({ config, backend, rules: [] });
+  assert.equal(sessions(restored)[0].pinned, false);
+  assert.equal(proposals(restored)[0].pinned, false);
+  assert.deepEqual(sessions(restored)[0].messages, sessions(core)[0].messages);
+  restored.manageConversation("legacy", "pin");
+  restored.manageConversation(suggestion.id, "pin");
+  assert.equal(sessions(restored)[0].pinned, true);
+  assert.equal(proposals(restored)[0].pinned, true);
+});
+
+for (const action of ["pin", "unpin"] as const) {
+  test(`${action} 保存失败回滚会话和建议，不改变归档或历史也不发送成功回执`, async t => {
+    const { core, config, backend, directory } = await fixture(t);
+    await core.prompt("save-pin", "保留会话", undefined, false, "session");
+    core.addRule({ id: "pin-rule", type: "event", eventName: "pin-fixture", title: "保留建议", message: "待执行", cooldownMs: 0 });
+    const suggestion = core.signal({ type: "event", name: "pin-fixture" })[0];
+    const ids = ["session", suggestion.id];
+    for (const id of ids) {
+      core.manageConversation(id, "archive");
+      if (action === "unpin") core.manageConversation(id, "pin");
+    }
+    const before = { conversations: sessions(core), proposals: proposals(core), history: core.status().history };
+    const path = join(directory, "state.json");
+    const original = await readFile(path);
+    await rm(path);
+    await mkdir(path);
+    const events: AgentEvent[] = [];
+    core.events.subscribe(event => events.push(event));
+    for (const id of ids) assert.throws(() => core.manageConversation(id, action));
+    assert.deepEqual(sessions(core), before.conversations);
+    assert.deepEqual(proposals(core), before.proposals);
+    assert.deepEqual(core.status().history, before.history);
+    assert.equal(events.length, 0);
+    await rm(path, { recursive: true });
+    await writeFile(path, original);
+    const restored = new AgentCore({ config, backend, rules: [] });
+    assert.deepEqual(sessions(restored), before.conversations);
+    assert.deepEqual(proposals(restored), before.proposals);
+  });
+}
+
+test("置顶建议稍后提醒到期重发时保留置顶回执和持久化状态", async t => {
+  const { core, config, backend } = await fixture(t);
+  core.addRule({ id: "reminder", type: "event", eventName: "pin-fixture", title: "稍后处理", message: "待执行", cooldownMs: 0 });
+  const suggestion = core.signal({ type: "event", name: "pin-fixture" })[0];
+  core.manageConversation(suggestion.id, "pin");
+  await core.decide(suggestion.id, "later", 1);
+  const restored = new AgentCore({ config, backend, rules: [] });
+  const events = restored.tick(new Date(Date.now() + config.proactive.suggestionCooldownMs + 120_000));
+  const reminder = events.find(event => event.kind === "proactive.suggestion" && event.payload.suggestionId === suggestion.id);
+  assert.ok(reminder);
+  assert.equal(reminder.payload.pinned, true);
+  assert.equal(reminder.payload.state, "pending");
+  assert.equal(proposals(restored)[0].pinned, true);
+  assert.equal(proposals(new AgentCore({ config, backend, rules: [] }))[0].pinned, true);
+});
+
+test("已置顶的旧欢迎建议在退役样例规则时保留", async t => {
+  const { core, config, backend } = await fixture(t);
+  core.addRule({ id: "welcome", type: "event", eventName: "app-launched", title: "给今天留一个起点",
+    message: "可以一起梳理今天的优先事项。当前未连接日历或任务来源，你可以先告诉我最想推进的一件事。", cooldownMs: 24 * 60 * 60_000 });
+  const suggestion = core.signal({ type: "event", name: "app-launched" })[0];
+  core.manageConversation(suggestion.id, "pin");
+  const restored = new AgentCore({ config, backend });
+  assert.equal(restored.scheduler.listRules().some(rule => rule.id === "welcome"), false);
+  assert.equal(proposals(restored).length, 1);
+  assert.equal(proposals(restored)[0].id, suggestion.id);
+  assert.equal(proposals(restored)[0].pinned, true);
+});
+
+test("完成建议超过保留上限时只清理未置顶项，置顶项跨重启保留", async t => {
+  const { core, config, backend, directory } = await fixture(t);
+  core.setPaused(false);
+  const path = join(directory, "state.json");
+  const saved = JSON.parse(await readFile(path, "utf8")) as PersistedState;
+  const finished = Array.from({ length: 101 }, (_, index): Proposal => ({
+    id: `finished-${index}`, ruleId: "fixture", title: "已完成建议", summary: "保留内容", reason: "测试保留上限",
+    createdAt: new Date(index * 1_000).toISOString(), state: "completed", context: {},
+  }));
+  saved.proposals = [
+    { ...finished[0], id: "pinned-completed", pinned: true },
+    { ...finished[0], id: "pinned-ignored", state: "ignored", pinned: true },
+    ...finished,
+  ];
+  await writeFile(path, JSON.stringify(saved));
+  const restored = new AgentCore({ config, backend, rules: [] });
+  restored.events.emit({ kind: "agent.activity", source: "agent", payload: { category: "execution", phase: "completed" } });
+  const retained = proposals(restored);
+  assert.equal(retained.length, 102);
+  assert.deepEqual(retained.filter(item => item.pinned).map(item => item.id), ["pinned-completed", "pinned-ignored"]);
+  assert.equal(retained.some(item => item.id === "finished-0"), false);
+  assert.equal(retained.some(item => item.id === "finished-100"), true);
+  assert.deepEqual(proposals(new AgentCore({ config, backend, rules: [] })), retained);
+});
 
 test("会话完成、恢复、归档、取消归档与删除跨重启保持，操作输出回执", async t => {
   const { core, config, backend } = await fixture(t);
@@ -45,13 +188,15 @@ test("独立会话不会串上下文，续聊包含自己的成功轮次", async
   assert.deepEqual(contexts[2], [{ role: "user", content: "会话 A" }, { role: "assistant", content: "回复 会话 A" }]);
 });
 
-test("运行中会话拒绝归档删除；失败状态与中断恢复不会伪装完成", async t => {
+test("运行中会话拒绝归档删除和置顶；失败状态与中断恢复不会伪装完成", async t => {
   let reject!: (error: Error) => void;
   const { core, config, backend, directory } = await fixture(t, async () => new Promise((_resolve, fail) => { reject = fail; }));
   const running = core.prompt("pending", "测试", undefined, false, "session");
   while (!reject) await new Promise(resolve => setImmediate(resolve));
   assert.throws(() => core.manageConversation("session", "archive"), /停止/);
   assert.throws(() => core.manageConversation("session", "delete"), /停止/);
+  assert.throws(() => core.manageConversation("session", "pin"), /停止/);
+  assert.throws(() => core.manageConversation("session", "unpin"), /停止/);
   assert.equal(sessions(core)[0].state, "running");
   const interrupted = new AgentCore({ config, backend, rules: [] });
   assert.equal(sessions(interrupted)[0].state, "failed");

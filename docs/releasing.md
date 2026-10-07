@@ -103,7 +103,7 @@ Updates use HTTPS, Ed25519 signatures for the complete feed and archive, and val
 
 ## Signing and release packages
 
-[release/config.json](../release/config.json) has a `null` public key, so release preflight currently refuses to proceed. Before the first release, provision a dedicated Another You Ed25519 key and stable code-signing identity. Commit only the public key; keep the private key and its backup outside the repository. Do not reuse another app's update identity. Both architectures must come from the same clean commit, with an `X.Y.Z` version and an increasing build number.
+[release/config.json](../release/config.json) contains the dedicated Another You Ed25519 public key. Release packaging requires the matching private update key and a stable code-signing identity. Commit only the public key; keep the private key and its backup outside the repository. Do not reuse another app's update identity. Both architectures must come from the same clean commit, with an `X.Y.Z` version and an increasing build number.
 
 | Variable | Purpose |
 | --- | --- |
@@ -116,6 +116,8 @@ Updates use HTTPS, Ed25519 signatures for the complete feed and archive, and val
 | `NOTARYTOOL_PROFILE` | Optional notarization profile, requiring Developer ID Application signing. |
 
 A stable self-signed certificate is not Developer ID or Apple notarization. The manifest records these separately. For initial key creation, the official command is `generate_keys --account another-you`; use the same account for export, set `umask 077` first, and never print or commit the private key.
+
+For each release, use the signing-material paths supplied by the user for that run to set `SPARKLE_ED_KEY_FILE` and, if needed, `CODE_SIGN_KEYCHAIN`. Do not record personal paths in skills, READMEs, or repository files. Keep private keys and `.p12` backups in a dedicated directory outside the repository, with directory mode `700` and file mode `600`. Preserve existing signing identities and the release public key when relocating private keys.
 
 Set the environment above and the release parameters before running these examples. `--config` precedes the subcommand, and output directories must not already exist:
 

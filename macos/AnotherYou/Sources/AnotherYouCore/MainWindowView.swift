@@ -276,7 +276,7 @@ public struct SettingsView: View {
     }
 
     private var modelSettings: some View {
-        ModelSettingsView(session: store.modelSettings, modelsFileURL: store.modelsFileURL)
+        ModelSettingsView(session: store.modelSettings)
     }
 
     private var suggestionSettings: some View {
@@ -292,7 +292,8 @@ public struct SettingsView: View {
                 if !store.notificationSupported { Text(AppLocalization.text("系统通知需要从 Another You.app 启动。")).font(.caption).foregroundStyle(.secondary) }
                 if let message = store.notificationMessage { Text(AppLocalization.text(message)).font(.caption).foregroundStyle(.secondary) }
             } header: { Text(AppLocalization.text("介入方式")) }
-            ProactiveContextSettingsView(session: store.proactiveContext, desktop: store.desktop, paused: store.paused)
+            LocalModelSettingsView(session: store.localModelSettings, paused: store.paused || !store.proactiveContext.enabled)
+            ProactiveContextSettingsView(session: store.proactiveContext, desktop: store.desktop, settings: store.localModelSettings, paused: store.paused)
         }
     }
 

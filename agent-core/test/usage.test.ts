@@ -3,12 +3,12 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { AgentCore, createDefaultConfig, retainedUsage, type PiAgentBackend, type UsageRecord } from "../src/index.ts";
+import { AgentCore, createDefaultConfig, retainedUsage, type AgentEvent, type PiAgentBackend, type UsageRecord } from "../src/index.ts";
 
 const usage = { inputTokens: 10, outputTokens: 20, cacheReadTokens: 3, cacheWriteTokens: 4, totalTokens: 37 };
 const source = { repository: "test", ref: "test", commit: "test" };
 
-test("用量与活动历史独立持久化，精确保留30天并记录两轮上下文", async () => {
+test("用量与活动历史独立持久化，精确保留186天并记录两轮上下文", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "another-you-usage-"));
   try {
     const now = new Date("2026-10-01T12:00:00Z");
@@ -25,9 +25,15 @@ test("用量与活动历史独立持久化，精确保留30天并记录两轮上
     const records = restored.status().usageRecords as UsageRecord[];
     assert.equal(records.length, 105);
     assert.equal(records.reduce((sum, record) => sum + record.usage!.totalTokens, 0), 3885);
-    assert.equal((restored.status().history as unknown[]).length, 420);
-    assert.equal(retainedUsage(records, new Date(now.getTime() + 30 * 86400_000)).length, 105);
-    assert.equal(retainedUsage(records, new Date(now.getTime() + 30 * 86400_000 + 1)).length, 0);
+    const history = restored.status().history as AgentEvent[];
+    assert.equal(history.length, 420);
+    const request = history.find(event => event.kind === "agent.activity" && event.payload.phase === "started" && event.payload.requestId === "104");
+    assert.equal(request?.payload.input, "question 104");
+    assert.equal(request?.payload.runId, records.at(-1)?.runId);
+    const later = new AgentCore({ config, backend, now: () => new Date(now.getTime() + 60 * 86400_000), rules: [] });
+    assert.equal((later.status().usageRecords as UsageRecord[]).length, 105);
+    assert.equal(retainedUsage(records, new Date(now.getTime() + 186 * 86400_000)).length, 105);
+    assert.equal(retainedUsage(records, new Date(now.getTime() + 186 * 86400_000 + 1)).length, 0);
   } finally { await rm(dataDir, { recursive: true, force: true }); }
 });
 

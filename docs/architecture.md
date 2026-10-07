@@ -27,15 +27,15 @@ flowchart TD
 
 [AgentClient.swift](../macos/AnotherYou/Sources/AnotherYouCore/AgentClient.swift) owns process launch, JSONL framing, decoding, and shutdown. [AssistantStore.swift](../macos/AnotherYou/Sources/AnotherYouCore/AssistantStore.swift) updates cards and activity from real events, correlates prompt responses, and supplies idle measurements. It does not treat a sent command as a completed action.
 
-[AgentCore](../agent-core/src/index.ts) owns proposal transitions and persisted history. [ProactiveScheduler](../agent-core/src/scheduler.ts) matches time, event, and idle rules and applies cooldown/deduplication. [ProactiveCoordinator](../agent-core/src/proactive.ts) schedules separate work, notification, and synthesis tasks with spacing, fingerprints, deduplication, and backoff; it requests asynchronous collection only after the Swift host declares the sources. Subagents return structured facts, and the parent decides whether to emit one suggestion. [PiSdkBackend](../agent-core/src/pi-adapter.ts) gives background roles an empty tool list.
+[AgentCore](../agent-core/src/index.ts) owns proposal transitions and persisted history. [ProactiveScheduler](../agent-core/src/scheduler.ts) matches time, event, and idle rules and applies cooldown/deduplication. [ProactiveCoordinator](../agent-core/src/proactive.ts) schedules separate work, notification, and synthesis tasks with spacing, fingerprints, deduplication, and backoff; it requests asynchronous collection only after the Swift host declares the sources. Work analysis and synthesis first use a separate [LocalModelBackend](../agent-core/src/local-model.ts) for Ollama or LM Studio. Actionable findings trigger timely synthesis; local drafts become conversations, and evidence-backed requests for more capability use the internal `remote_assist` Pi path. [PiSdkBackend](../agent-core/src/pi-adapter.ts) gives background roles an empty tool list.
 
-## Why suggestions do not require a model
+## Rules and local proactive decisions
 
 Proactive participation comes from explainable rules and low-frequency background analysis. App launch, local time, or measured idle duration can create a pending suggestion; work-window and notification analysis only suggests after changed context is analyzed and the parent finds an actionable next step. It does not infer unseen calendars, contacts, or files.
 
 A rule cannot create another suggestion while its previous proposal is pending, running, snoozed, or failed. Cooldowns and hashed deduplication keys further limit repetition. Snoozed suggestions keep their identity when they return. Pause and proposal state survive restarts; an interrupted generation returns as failed and needs a new user decision.
 
-Choosing to generate a draft sends the proposal's title, summary, and explicit context to the model. Direct questions send the submitted prompt. Each request starts a new Pi session without automatic conversation memory. Completed text is for review: it does not send a message, modify a file, or execute a command.
+Concrete drafts are always saved automatically as conversations that can be continued. Locally produced proposals keep their local execution route. Manual conversations use the selected Pi model, existing tools, and bounded conversation history. Background analysis has no execution tools and produces reviewable text. Unconfigured local services never trigger remote fallback.
 
 The app and sidecar must be running for signals to be processed. Time rules match the current local minute; missed time slots are not replayed. Snoozed proposals are restored on the next eligible tick after their due time. See the [CLI reference](cli-reference.md) for states and rules.
 
@@ -43,11 +43,11 @@ The app and sidecar must be running for signals to be processed. Time rules matc
 
 | Boundary | Current implementation |
 | --- | --- |
-| Model network | `local` uses loopback only. Non-loopback requests require an authorized privacy mode, network opt-in, exact allowed hostname, and HTTPS. Each fetch rejects redirects and leaving the configured origin. |
+| Model network | Local proactive assistance connects only to loopback or private LAN IP addresses. Remote assistance uses saved Pi provider configuration. Both reject HTTP redirects. |
 | Model tools | Interactive sessions register file, shell, network, background-browser, and available native-computer tools; analysis roles use no tools. Pi project configuration, extensions, skills, and tool settings are not loaded. |
-| Model credentials | The first valid local Pi discovery initializes an independent app snapshot of model settings and accounts; existing app values take precedence. Pi ModelRuntime resolves authentication and provider configuration. Swift only displays model status and keeps no model or key copy. |
+| Model credentials | The first valid local Pi discovery initializes an independent app snapshot of model settings and accounts; existing app values take precedence. Local SQLite stores per-account configuration, credentials, and catalog caches; Pi storage adapters use the selected account. Swift holds a saved key briefly only after an explicit reveal, without adding it to state or history. |
 | Persisted content | Storage switches and basic credential redaction apply when saving state. They do not filter live model input/output or encrypt files. |
-| Proactive collection | `SystemContextCollector` asynchronously reads visible Accessibility text from the frontmost work window and Notification Center only when Accessibility is authorized, the session is unlocked, and the host has declared the source. It does not take screenshots, scan notification databases, or read files. |
+| Proactive collection | While the session is unlocked, `SystemContextCollector` reads multiple accessible application windows, current-user processes and working directories, linked projects and open files, plus local documents and browsing records within the selected period. Notifications still come from accessible Notification Center text. Windows and notifications require Accessibility; files and history respect OS access permissions. No screenshots, notification-database reads, or process-memory reads are performed. |
 | Native notifications | `AssistantStore` uses a separate UserDefaults preference and macOS authorization. The app must be bundled, inactive, and unpaused when a new suggestion arrives. `tools.notifications` is not this switch. |
 | Process isolation | Swift and Node communicate through pipes; these processes are not an operating-system sandbox for untrusted code. |
 | Development traffic | npm installs and Git source fetches operate separately from the model network policy. |

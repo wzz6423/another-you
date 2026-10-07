@@ -11,7 +11,7 @@ import { createDefaultConfig, saveConfig } from "../src/config.ts";
 import type { AgentEvent } from "../src/events.ts";
 import { writePiFixture } from "./pi-fixture.ts";
 
-test("真实 JSONL 与 Pi 会话闭环：历史入模、分类工具日志、归档错误、重启与删除", async t => {
+test("真实 JSONL 与 Pi 会话闭环：历史入模、分类工具日志、置顶、归档错误、重启与删除", async t => {
   const directory = await mkdtemp(join(tmpdir(), "another-you-conversation-cli-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const requests: Record<string, unknown>[] = [];
@@ -67,13 +67,27 @@ test("真实 JSONL 与 Pi 会话闭环：历史入模、分类工具日志、归
   assert.ok(first.events.some(event => event.kind === "agent.activity" && event.payload.category === "command" && event.payload.phase === "completed"));
   assert.ok(first.events.some(event => event.kind === "agent.activity" && event.payload.category === "thinking"));
   assert.equal(JSON.stringify(first.events).includes("fixture reasoning"), false);
+  first.send({ op: "conversationAction", conversationId: "session-a", action: "pin" });
+  const pinReceipt = await first.wait("conversation.updated", event => event.payload.action === "pin");
+  assert.equal((pinReceipt.payload.conversations as { pinned: boolean; archived: boolean }[])[0].pinned, true);
+  assert.equal((pinReceipt.payload.conversations as { archived: boolean }[])[0].archived, false);
   first.send({ op: "conversationAction", conversationId: "session-a", action: "archive" });
   await first.wait("conversation.updated", event => event.payload.action === "archive");
   first.send({ op: "prompt", requestId: "blocked", conversationId: "session-a", prompt: "不应执行" });
   await first.wait("agent.error", event => event.payload.conversationId === "session-a");
   await first.close();
 
+  const pinned = await launch();
+  assert.equal((pinned.status.payload.conversations as { pinned: boolean }[])[0].pinned, true);
+  assert.equal((pinned.status.payload.conversations as { archived: boolean }[])[0].archived, true);
+  pinned.send({ op: "conversationAction", conversationId: "session-a", action: "unpin" });
+  const unpinReceipt = await pinned.wait("conversation.updated", event => event.payload.action === "unpin");
+  assert.equal((unpinReceipt.payload.conversations as { pinned: boolean }[])[0].pinned, false);
+  assert.equal((unpinReceipt.payload.conversations as { archived: boolean }[])[0].archived, true);
+  await pinned.close();
+
   const restored = await launch();
+  assert.equal((restored.status.payload.conversations as { pinned: boolean }[])[0].pinned, false);
   assert.equal((restored.status.payload.conversations as { archived: boolean }[])[0].archived, true);
   assert.equal((restored.status.payload.conversations as { messages?: unknown }[])[0].messages, undefined);
   restored.send({ op: "conversationRead", conversationId: "session-a", readId: "read-restored" });

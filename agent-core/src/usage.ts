@@ -9,10 +9,30 @@ export interface UsageRecord {
   usage?: PiRunUsage["usage"];
   reasoningEffort: string;
   toolCalls: PiRunUsage["toolCalls"];
+  runId?: string;
+  requestId?: string;
+  suggestionId?: string;
+  appName?: string;
+  bundleId?: string;
+  windowTitle?: string;
+  route?: "local" | "remote";
+  provider?: string;
+  endpoint?: string;
+  requestPath?: string;
+  upstreamRequestId?: string;
+  startedAt?: string;
+  durationMs?: number;
 }
 
-export const USAGE_RETENTION_MS = 30 * 24 * 60 * 60_000;
+export const USAGE_RETENTION_MS = 186 * 24 * 60 * 60_000;
 
 export function retainedUsage(records: UsageRecord[], now: Date): UsageRecord[] {
-  return records.filter((record) => Date.parse(record.occurredAt) >= now.getTime() - USAGE_RETENTION_MS);
+  const cutoff = now.getTime() - USAGE_RETENTION_MS;
+  const seen = new Set<string>();
+  return records.filter(record => {
+    const date = Date.parse(record.occurredAt);
+    if (!record.id || !Number.isFinite(date) || date < cutoff || seen.has(record.id)) return false;
+    seen.add(record.id);
+    return true;
+  });
 }

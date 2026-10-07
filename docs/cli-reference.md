@@ -42,7 +42,7 @@ Send `{"op":"shutdown"}` to stop. EOF, SIGINT, and SIGTERM also stop scheduling 
 
 `now` and signal `at` values must be valid date strings; include a timezone when supplying them. `idleForMs` is a finite non-negative number. Omit synthetic timestamps in normal operation and report actual measured idle duration. Scheduling is skipped when disabled or paused, including due snoozes; direct prompts and user decisions remain available.
 
-Only one `prompt` or `decide/execute` model request can run at a time. Another such command immediately receives an error; it is not queued. Status, pause/resume, snooze/ignore, and shutdown remain processable. Each model HTTP request has a 60-second deadline; the complete tool loop has a 180-second deadline without implicit retries. `cancel` stops the active model and tools. Token-delta events are not emitted. See the [interaction protocol](desktop-automation.md#protocol-and-verification) for image attachments and native tool replies.
+Prompts with different `conversationId` values can run concurrently with separate histories and cancellation signals. A duplicate send to the same running conversation immediately receives an error instead of being queued. Proposal executions also retain independent run state. Status, pause/resume, snooze/ignore, and shutdown remain processable. Each model HTTP request has a 60-second deadline; the complete tool loop has a 180-second deadline without implicit retries. `cancel` with `conversationId` stops only that conversation’s model and tools; omitting it cancels all active requests. Shutdown cancels and awaits every active request. Token-delta events are not emitted. See the [interaction protocol](desktop-automation.md#protocol-and-verification) for image attachments and native tool replies.
 
 Rule edits and signal/tick commands have no generic acknowledgment event. Query `status` to inspect rule changes; a signal can legitimately produce no suggestion.
 
@@ -53,24 +53,31 @@ Each command below carries its own `requestId`:
 | `op` | Fields | Behavior |
 | --- | --- | --- |
 | `modelCatalog` | Optional `refresh: true` | Read the local catalog; explicit refresh requests catalogs for configured providers. |
-| `modelSelect` | `provider`, `model`; optional `thinkingLevel` | Save the Pi default model and a supported thinking level. |
-| `modelConfigure` | `provider`, `baseUrl`, `api`, `model`; optional `apiKey`, `thinkingLevel` | Validate and merge API configuration, store the key separately, and select the model. Supports `openai-completions`, `openai-responses`, and `anthropic-messages`. An omitted or blank key retains only an existing usable API-key credential; saving does not test connectivity. |
+| `modelSelect` | `provider`, `model`; optional `thinkingLevel`, `accountName` | Save the Pi default model and a supported thinking level. |
+| `modelConfigure` | `provider`, `baseUrl`, `api`, `model`; optional `apiKey`, `thinkingLevel`, `accountId`, `accountName`, `newAccount` | Validate and merge API configuration, store the key separately, and select the model. Supports `openai-completions`, `openai-responses`, and `anthropic-messages`. An omitted or blank key retains only an existing usable API-key credential; saving does not test connectivity. |
 | `modelTest` | None | Send a short request to the saved model without tools or conversation context and report the actual connection outcome. |
-| `modelLogin` | `provider`, `authType: api_key / oauth` | Start an interactive Pi authentication flow. |
+| `modelLogin` | `provider`, `authType: api_key / oauth`; optional `accountId`, `accountName`, `newAccount` | Start an interactive Pi authentication flow. |
 | `modelAuthReply` | Login `requestId`, `promptId`, `value` | Answer the current prompt: text follows prompt.required (optional text accepts an empty string), secret/manual_code reject blank values, and select must match an option. Non-selection input is trimmed before submission. Invalid or stale prompts do not end the original login. |
 | `modelAuthCancel` | Current operation's `requestId` | Cancel an account operation or catalog refresh. |
-| `modelLogout` | `provider` | Remove the provider's isolated account credential. |
-| `modelImport` | Absolute `path` | Import model definitions and defaults without importing credentials. |
+| `modelLogout` | `provider`; optional `accountId` | Clear credentials for the specified account, defaulting to the active account, while retaining its configuration. |
+| `modelImport` | Optional absolute `path` | Import model definitions and defaults from Pi's standard directory, preserving existing local configuration without importing credentials. Explicit paths still accept `models.json` or its directory. |
+| `modelAccountSelect` | `accountId` | Switch the account and its complete model configuration. |
+| `modelAccountDelete` | `accountId` | Delete the specified account; deleting the active account selects another saved account for that provider when available. |
+| `modelCredentialRead` | `accountId` | Explicitly read a saved API key, returned only through a live `model.credential` event. |
+
+`modelConfigure` and `modelLogin` update the active account by default. Set `newAccount: true` to create one, or `accountId` to target an existing account; these options cannot be combined. Optional `accountName` must be nonempty and at most 120 characters. Configuration, credentials, and per-account catalog caches are stored in `<dataDir>/pi/models.sqlite`.
 
 `model.catalog` returns `models`, `providers`, optional `selected`, and `message`. Providers supporting the API form also include `apiConfiguration: { baseUrl, api }`, with credentials, query parameters, and fragments removed from the URL and no API key returned. `model.operation` reports `operation` and `state` (`started`, `succeeded`, `failed`, `cancelled`); sending a command does not confirm persistence. `model.auth` carries `requestId`, `provider`, and a `stage` of `prompt`, `promptResolved`, `promptCancelled`, or `notify`. Prompt types follow Pi: `text`, `secret`, `manual_code`, and `select`; selection replies contain the option's `id`.
+
+`model.catalog.accounts` contains `id`, `provider`, `name`, `hasAPIKey`, and optional `credentialType`; a provider’s `accountId` identifies its active account without including a key. `model.credential` contains only `requestId`, `accountId`, and `apiKey`. Clients should match both the request and account and clear the key when leaving the reveal state. Read failures use the existing `model.operation` failed response. This event does not enter the EventBus or persisted history.
 
 Configuration changes, login, refresh, and connection tests are mutually exclusive with each other and with model requests. Local catalog reads remain available. Authentication has a ten-minute deadline; catalog refresh has a twenty-second deadline. Connection tests have a sixty-second deadline and can be cancelled with `modelAuthCancel`. EOF, shutdown, or disconnect cancels pending authentication and connection tests. Authentication content uses only the live transport and never enters the EventBus, conversation, or state history. Real-provider login and model compatibility require separate verification.
 
 ## Conversations and activity
 
-`prompt` accepts optional `conversationId`, defaulting to the compatible `default` session. Conversations have isolated context. `conversationAction` requires `conversationId` and `action` (`archive`, `unarchive`, `delete`); running conversations cannot be archived or deleted. Success emits `conversation.updated` with `conversationId`, optional `action`, `conversations`, and `proposals`; failures emit `agent.error` with `conversationId`.
+`prompt` accepts optional `conversationId`, defaulting to the compatible `default` session. Conversations have isolated context. `conversationAction` requires `conversationId` and `action` (`archive`, `unarchive`, `delete`, `pin`, `unpin`); running conversations and proposals reject these actions. Successful persistence emits `conversation.updated` with `conversationId`, optional `action`, `conversations`, and `proposals`; failures emit `agent.error` with `conversationId` and leave the confirmed state unchanged. Pinning is persisted for conversations and proposals independently of their archive state, without changing their timestamps. Missing `pinned` fields in older state files default to `false`. Pinned proposals are excluded from automatic cleanup of completed and ignored proposals.
 
-`agent.status.payload.conversations` contains `id`, `title`, optional `appName`, `createdAt`, `updatedAt`, `state`, and `archived`; messages are returned by the on-demand read protocol below. Restart persistence respects `privacy.storePrompts` / `privacy.storeResponses`; screenshot binaries are not persisted. `agent.activity` contains only `category` (`thinking`, `execution`, `command`, `context`), `phase` (`started`, `completed`, `failed`), optional `toolName`, and `source`. It does not transmit thinking text or command arguments.
+`agent.status.payload.conversations` contains `id`, `title`, optional `appName`, `createdAt`, `updatedAt`, `state`, `archived`, and `pinned`; messages are returned by the on-demand read protocol below. Restart persistence respects `privacy.storePrompts` / `privacy.storeResponses`; screenshot binaries are not persisted. `agent.activity` contains `category` (`thinking`, `execution`, `command`, `context`), `phase` (`started`, `completed`, `failed`), optional `toolName`, and `source`. It never transmits thinking text. New records also carry `runId`, actual application/window metadata, tool `action`/`toolCallId`, bounded and redacted `input`/`result`, decision reasons, duration, and model-call metadata.
 
 `conversationFork` requires a source `conversationId` and a distinct `requestId`, with an optional `messageId`. It copies the full conversation, or the prefix through the selected turn, retaining message IDs. The new independent session records `forkedFrom: { conversationId, messageId }`; the source stays unchanged and no model request or extra usage is recorded. Forking is rejected while a foreground request is running. The successful `conversation.updated` receipt includes `action: "fork"`, `requestId`, `sourceConversationId`, and the new `conversationId`. Clients switch only after the matching receipt and then read the complete messages. Failed persistence creates no session; errors include the source `conversationId` and `requestId`.
 
@@ -104,7 +111,7 @@ Copy a real `payload.suggestionId` from `proactive.suggestion` or an `id` from `
 | `morning` | Local time `09:00` | 20 hours |
 | `idle` | Idle duration at least 900,000 ms (15 minutes) | 2 hours |
 
-Upgrades retire the unchanged legacy `welcome` rule. Its pending sample is removed only when the original launch event remains in history and no user decision or archive action is recorded. Modified rules, user conversations, handled suggestions, and cards without sufficient history are preserved.
+Upgrades retire the unchanged legacy `welcome` rule. Its pending sample is removed only when the original launch event remains in history and no user decision or archive action is recorded. Modified rules, user conversations, pinned or handled suggestions, and cards without sufficient history are preserved.
 
 The default deduplication window is 300,000 ms. A rule also waits until its existing pending/running/snoozed/failed proposal is resolved. The core polls time every 30 seconds by default; it does not infer idle duration on its own. The Swift host supplies actual idle measurements every 30 seconds.
 
@@ -171,3 +178,26 @@ Usage records are retained separately for 30 days. `usage` contains `inputTokens
 The `conversations` fields in `agent.status` and `conversation.updated` contain summaries without message arrays. Opening one sends `{"op":"conversationRead","conversationId":"…","readId":"…"}`; `conversation.messages` returns the same IDs and a complete `conversation`. Read responses are not recorded as activity, and clients ignore responses for stale `readId` values.
 
 Small events remain one JSON line. `encodeEvent` transparently splits events exceeding 3 MiB of UTF-8 into `protocol.chunk` envelopes. Their payload contains `eventId`, zero-based `index`, `total`, and base64 `data` (up to 128 KiB of original bytes per chunk). The host dispatches only the reconstructed event, rejecting out-of-order, duplicate, or over-64-MiB assemblies. Incomplete events are not dispatched; a subsequent complete event or new chunk sequence can recover. Frame limits do not truncate saved content.
+
+## Local proactive assistant protocol
+
+These commands require `requestId`. Their `localModel.operation` acknowledgement contains the matching ID, `operation`, `state` (`started`, `succeeded`, `failed`, `cancelled`), and optional `message`. Account acknowledgements are not persisted.
+
+| Command | Fields | Behavior |
+| --- | --- | --- |
+| `localModelConfigure` | `localModel` | Save and apply local settings, cancelling background analysis when necessary and refusing to interrupt a manual task. |
+| `localModelModels` | `localModel` | Read models from the draft service; successful replies include `models`. Does not save draft settings. |
+| `localModelTest` | None | Send a real request to the saved local model and validate structured output. |
+| `localModelCancel` | Original `requestId` | Cancel the current model-list or connection-test operation. |
+| `proactiveConfigure` | `workLookbackHours` | Save the lookback (`24` / `168` / `720`); the success receipt includes the saved value. Existing background work is cancelled when needed, and subsequent collection uses the new range. |
+| `proactiveCheck` | None | Schedule a recent local work-context check; rejected while paused, unconfigured, or occupied by a manual task. |
+
+`agent.status.payload.localModel` carries local connection state, credential-free `configuration`, `hasAPIKey`, `workLookbackHours`, and hardware recommendations. It is separate from the manual-conversation `model`.
+
+A `work` `context.request` includes `lookbackHours`. The host returns `scope:"local-work-context"`, `lookbackHours`, `items`, and `coverage`. Each item includes a stable `id`, `source` (`application` / `process` / `workspace` / `document` / `browser-history`), `title`, `observedAt`, `contentStatus`, and optional text/source fields. Work responses allow up to 512000 characters; notifications retain their 40000-character limit. Legacy `work.text` remains supported. Collected content is data, never model instructions.
+
+`agent.activity` and `agent.usage` identify an execution with `runId`; remote escalation creates a new run with `parentRunId`. Records may include `route`, `provider`, `endpoint`, `requestPath`, `startedAt`, `durationMs`, `upstreamRequestId`, application metadata, and reported usage. Missing legacy fields must not be inferred from nearby timestamps. Reasoning effort never includes thinking text.
+
+Computer-tool receipts record the actual target in `targetAppName`, `targetBundleId`, and `targetWindowTitle`. Tool duration comes from start and end events with the same `toolCallId`; missing pairs remain unknown.
+
+An automatic draft's `proactive.suggestion` includes `conversationId`, `state:"completed"`, and the actual `draft`/`text`, alongside a `conversation.updated` event. Show this conversation without also creating a proposal card. Read full results with `conversationRead`. Suggestions without a draft keep the existing `suggestionId`/`decide` flow. Quiet decisions, duplicates, escalation, and failures are retained as inspectable activity.

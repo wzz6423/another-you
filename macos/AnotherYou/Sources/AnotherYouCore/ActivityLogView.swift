@@ -8,6 +8,7 @@ struct ActivityLogView: View {
     @State private var period: UsagePeriod = .day
     @State private var category: ActivityCategory = .all
     @State private var grouped = false
+    @State private var selectedEvent: AgentEvent?
 
     init(store: AssistantStore) {
         self.store = store
@@ -21,6 +22,7 @@ struct ActivityLogView: View {
         .onReceive(store.$history) { next in
             if history != next { history = next }
         }
+        .sheet(item: $selectedEvent) { event in ActivityDetailView(store: store, event: event) }
     }
 
     private func activityLog(_ snapshot: ActivityHistory) -> some View {
@@ -68,17 +70,21 @@ struct ActivityLogView: View {
     }
 
     private func row(_ event: AgentEvent) -> some View {
+        Button { selectedEvent = event } label: {
         HStack(alignment: .top, spacing: 12) {
             Image(systemName: event.activityCategory?.icon ?? "circle").foregroundStyle(.secondary).frame(width: 18)
             VStack(alignment: .leading, spacing: 5) {
-                Text(event.activityTitle(locale: interfaceLocale)).font(.system(size: 12, weight: .medium))
+                Text(event.payload["action"]?.string.map { AppLocalization.text($0) } ?? event.activityTitle(locale: interfaceLocale)).font(.system(size: 12, weight: .medium))
+                if let app = event.payload["appName"]?.string { Text(app).font(.caption).foregroundStyle(.secondary) }
                 if let detail = event.payload["toolName"]?.string ?? event.payload["message"]?.string ?? event.payload["text"]?.string ?? event.payload["prompt"]?.string {
-                    Text(detail).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(3).textSelection(.enabled)
+                    Text(detail).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(3)
                 }
             }
             Spacer(minLength: 8)
             Text(event.date.map { AppLocalization.date($0) } ?? "").font(.caption2).foregroundStyle(.secondary)
+            Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.tertiary)
         }.padding(.vertical, 12).frame(maxWidth: .infinity, alignment: .leading)
-            .overlay(alignment: .bottom) { Divider() }
+            .contentShape(Rectangle())
+        }.buttonStyle(.plain).accessibilityHint(AppLocalization.text("查看执行详情"))
     }
 }

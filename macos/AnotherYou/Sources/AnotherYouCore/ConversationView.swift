@@ -16,7 +16,7 @@ struct ConversationView: View {
                 if let onBack {
                     Button(AppLocalization.text("返回会话看板"), systemImage: "chevron.backward", action: onBack)
                         .labelStyle(.iconOnly).help(AppLocalization.text("返回会话看板"))
-                        .disabled(store.hasPendingPrompt || !store.pendingConversationActions.isEmpty)
+                        .disabled(!store.pendingConversationActions.isEmpty)
                 }
                 Text(store.sessions.first { $0.id == store.selectedConversationID }?.title ?? AppLocalization.text("会话"))
                     .font(.system(size: 22, weight: .semibold, design: .rounded)).lineLimit(1)
@@ -30,7 +30,7 @@ struct ConversationView: View {
                     Text(AppLocalization.text("分支会话")).font(.caption).foregroundStyle(.secondary)
                     if store.sessions.contains(where: { $0.id == origin.conversationID }) {
                         Button(AppLocalization.text("查看来源会话")) { store.selectConversation(origin.conversationID) }
-                            .font(.caption).disabled(store.hasPendingPrompt || !store.pendingConversationActions.isEmpty)
+                            .font(.caption).disabled(!store.pendingConversationActions.isEmpty)
                     }
                 }
             }
@@ -40,7 +40,7 @@ struct ConversationView: View {
                     Text(error).font(.caption).foregroundStyle(.red)
                     if let id = store.selectedConversationID {
                         Button(AppLocalization.text("重试")) { store.selectConversation(id) }
-                            .disabled(store.hasPendingPrompt || !store.pendingConversationActions.isEmpty)
+                            .disabled(!store.pendingConversationActions.isEmpty)
                     }
                 }
             }
@@ -139,7 +139,7 @@ struct ConversationComposer: View {
                 .focused($inputFocused)
                 .disabled(updates.isInstalling)
             HStack(spacing: 12) {
-                if store.hasPendingPrompt {
+                if store.selectedConversationHasPendingPrompt {
                     Button(AppLocalization.text("停止"), systemImage: "stop.fill") { store.stopCurrentTask() }
                         .appShortcut(.stop)
                 }
@@ -147,13 +147,12 @@ struct ConversationComposer: View {
                 Toggle(AppLocalization.text("允许前台控制"), isOn: $desktop.allowForeground)
                     .toggleStyle(.checkbox).font(.caption)
                     .help(AppLocalization.text("开启后，电脑操作可能移动鼠标、输入文字或切换应用。默认使用后台操作。"))
-                    .disabled(store.hasPendingPrompt)
-                Button(store.hasPendingPrompt ? AppLocalization.text("正在生成") : AppLocalization.text("发送"), systemImage: "arrow.up") {
+                Button(store.selectedConversationHasPendingPrompt ? AppLocalization.text("正在生成") : AppLocalization.text("发送"), systemImage: "arrow.up") {
                     if store.ask(prompt) { store.setInputDraft("", for: .conversation); inputFocused = true }
                 }
                 .buttonStyle(.borderedProminent).tint(.blue).controlSize(.small)
                 .appShortcut(.sendMessage)
-                .disabled((prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && desktop.attachments.isEmpty) || !store.isConnected || !store.modelConfigured || store.hasPendingPrompt || store.isLoadingConversation || updates.isInstalling || !store.pendingConversationActions.isEmpty || (store.selectedConversationID != nil && store.conversationActionError != nil))
+                .disabled((prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && desktop.attachments.isEmpty) || !store.isConnected || !store.modelConfigured || store.selectedConversationHasPendingPrompt || store.isLoadingConversation || updates.isInstalling || !store.pendingConversationActions.isEmpty || (store.selectedConversationID != nil && store.conversationActionError != nil))
             }
         }
         .padding(16).background(.background, in: RoundedRectangle(cornerRadius: 16))
@@ -186,7 +185,7 @@ private struct ConversationMessageRow: View, Equatable {
             }
             Text(message.prompt).font(.system(size: 13, weight: .medium)).textSelection(.enabled)
             if let response = message.response {
-                Text(response).font(.system(size: 13)).lineSpacing(4).textSelection(.enabled).transition(.opacity)
+                MarkdownText(response).transition(.opacity)
             } else if let error = message.error {
                 Text(AppLocalization.message(error)).font(.system(size: 12)).foregroundStyle(.red).textSelection(.enabled).transition(.opacity)
             } else {

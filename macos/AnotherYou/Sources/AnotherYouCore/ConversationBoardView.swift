@@ -1,6 +1,6 @@
 import SwiftUI
 
-private struct BoardEntry: Identifiable {
+struct BoardEntry: Identifiable {
     var session: ConversationSession?
     var proposal: ProactiveCard?
     var id: String { session?.id ?? proposal!.id }
@@ -10,9 +10,22 @@ private struct BoardEntry: Identifiable {
     var completed: Bool { session?.state == "completed" || proposal?.state == .completed || proposal?.state == .ignored }
     var running: Bool { session?.state == "running" || proposal?.state == .running }
     var archived: Bool { session?.archived ?? proposal!.archived }
+    var pinned: Bool { session?.pinned ?? proposal!.pinned }
     var stateLabel: String {
         if let proposal { return proposal.state.label }
         return AppLocalization.text(session?.state == "running" ? "进行中" : session?.state == "completed" ? "已完成" : "失败")
+    }
+
+    static func ordered(_ lhs: BoardEntry, _ rhs: BoardEntry) -> Bool {
+        if lhs.pinned != rhs.pinned { return lhs.pinned }
+        return lhs.date > rhs.date
+    }
+
+    static func filtered(_ entries: [BoardEntry], query: String) -> [BoardEntry] {
+        let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        return entries.filter { query.isEmpty
+            || $0.title.localizedCaseInsensitiveContains(query)
+            || $0.appName.localizedCaseInsensitiveContains(query) }
     }
 }
 
@@ -27,15 +40,20 @@ struct ConversationBoardView: View {
     @State private var selectedProposal: ProactiveCard?
     @State private var previewSession = false
     @State private var archiveExpanded = false
+    @State private var searchQuery = ""
+
+    private var isSearching: Bool { !searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+
+    private var matchingEntries: [BoardEntry] {
+        BoardEntry.filtered(store.sessions.map { BoardEntry(session: $0) } + store.cards.map { BoardEntry(proposal: $0) }, query: searchQuery)
+    }
 
     private var entries: [BoardEntry] {
-        (store.sessions.map { BoardEntry(session: $0) } + store.cards.map { BoardEntry(proposal: $0) })
-            .filter { $0.archived == archived }.sorted { $0.date > $1.date }
+        matchingEntries.filter { $0.archived == archived }.sorted(by: BoardEntry.ordered)
     }
 
     private var archivedEntries: [BoardEntry] {
-        (store.sessions.map { BoardEntry(session: $0) } + store.cards.map { BoardEntry(proposal: $0) })
-            .filter(\.archived).sorted { $0.date > $1.date }
+        matchingEntries.filter(\.archived).sorted(by: BoardEntry.ordered)
     }
 
     var body: some View {
@@ -45,8 +63,20 @@ struct ConversationBoardView: View {
                 Spacer()
                 Toggle(AppLocalization.text("按应用分组"), isOn: $groupByApplication).toggleStyle(.checkbox).font(.caption)
             }
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                TextField(AppLocalization.text("搜索会话或应用"), text: $searchQuery)
+                    .textFieldStyle(.plain)
+                if !searchQuery.isEmpty {
+                    Button { searchQuery = "" } label: { Image(systemName: "xmark.circle.fill") }
+                        .buttonStyle(.plain).foregroundStyle(.secondary)
+                        .help(AppLocalization.text("清除搜索")).accessibilityLabel(AppLocalization.text("清除搜索"))
+                }
+            }
             if let error = store.conversationActionError { Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled) }
-            if archived {
+            if isSearching && entries.isEmpty {
+                if !includesArchived || archivedEntries.isEmpty { entryList([]) }
+            } else if archived {
                 entryList(entries, isArchive: true)
             } else {
                 HStack(alignment: .top, spacing: 14) {
@@ -55,21 +85,25 @@ struct ConversationBoardView: View {
                 }
             }
             if includesArchived {
-                DisclosureGroup(isExpanded: $archiveExpanded) {
-                    entryList(archivedEntries, isArchive: true).padding(.top, 12)
-                } label: {
-                    HStack {
-                        Text(AppLocalization.text("已归档会话")).font(.subheadline.bold())
-                        Text(AppLocalization.number(archivedEntries.count)).font(.caption).foregroundStyle(.secondary)
+                if isSearching {
+                    if !archivedEntries.isEmpty {
+                        VStack(alignment: .leading, spacing: 12) {
+                            archiveHeader
+                            entryList(archivedEntries, isArchive: true)
+                        }.padding(.top, 12)
                     }
+                } else {
+                    DisclosureGroup(isExpanded: $archiveExpanded) {
+                        entryList(archivedEntries, isArchive: true).padding(.top, 12)
+                    } label: { archiveHeader }
+                    .padding(.top, 12)
                 }
-                .padding(.top, 12)
             }
         }
         .sheet(item: $selectedProposal) { proposal in
             ScrollView {
                 if let current = store.cards.first(where: { $0.id == proposal.id }) {
-                    ProactiveCardView(card: current, busy: store.pendingActions.contains(current.id), connected: store.isConnected && !current.archived, modelConfigured: store.modelConfigured) { store.apply($0, to: current) }
+                    ProactiveCardView(card: current, busy: store.pendingActions.contains(current.id), connected: store.isConnected && !current.archived, modelConfigured: current.usesLocalModel ? store.localModelSettings.configured : store.modelConfigured) { store.apply($0, to: current) }
                 }
             }.padding(20).frame(minWidth: 480, idealWidth: 580, minHeight: 300)
                 .safeAreaInset(edge: .top) {
@@ -81,6 +115,13 @@ struct ConversationBoardView: View {
                 .safeAreaInset(edge: .top) {
                     HStack { Spacer(); Button(AppLocalization.text("关闭")) { previewSession = false }.keyboardShortcut(.cancelAction) }.padding(12)
                 }
+        }
+    }
+
+    private var archiveHeader: some View {
+        HStack {
+            Text(AppLocalization.text("已归档会话")).font(.subheadline.bold())
+            Text(AppLocalization.number(archivedEntries.count)).font(.caption).foregroundStyle(.secondary)
         }
     }
 
@@ -97,7 +138,7 @@ struct ConversationBoardView: View {
     private func entryList(_ entries: [BoardEntry], isArchive: Bool = false) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             if entries.isEmpty {
-                Text(AppLocalization.text(isArchive ? "暂无已归档会话" : "暂无会话"))
+                Text(AppLocalization.text(isSearching ? "未找到匹配会话" : isArchive ? "暂无已归档会话" : "暂无会话"))
                     .font(.caption).foregroundStyle(.secondary).padding(.vertical, 20).frame(maxWidth: .infinity, alignment: .leading)
             }
             ForEach(groupByApplication ? Array(Set(entries.map(\.appName))).sorted() : [""], id: \.self) { group in
@@ -121,18 +162,26 @@ struct ConversationBoardView: View {
                 } label: {
                     Text(entry.title).font(.subheadline.weight(.medium)).lineLimit(3).frame(maxWidth: .infinity, alignment: .leading)
                         .contentShape(Rectangle())
-                }.buttonStyle(.plain).disabled(entry.session != nil && store.hasPendingPrompt)
+                }.buttonStyle(.plain).disabled(entry.session != nil && !store.pendingConversationActions.isEmpty)
                 Menu {
+                    Button(AppLocalization.text(entry.pinned ? "取消置顶" : "置顶")) {
+                        store.manageConversation(entry.id, action: entry.pinned ? "unpin" : "pin")
+                    }
+                    Divider()
                     Button(AppLocalization.text(entry.archived ? "恢复会话" : "归档")) {
                         store.manageConversation(entry.id, action: entry.archived ? "unarchive" : "archive")
                     }
                     Button(AppLocalization.text("删除"), role: .destructive) { store.manageConversation(entry.id, action: "delete") }
                 } label: { Image(systemName: "ellipsis") }
-                    .menuStyle(.borderlessButton).fixedSize()
+                    .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
                     .disabled(entry.running || !store.isConnected || store.pendingConversationActions.contains(entry.id))
                     .accessibilityLabel(AppLocalization.text("会话操作"))
             }
             HStack(spacing: 6) {
+                if entry.pinned {
+                    Image(systemName: "pin.fill").font(.caption).foregroundStyle(.secondary)
+                        .help(AppLocalization.text("已置顶")).accessibilityLabel(AppLocalization.text("已置顶"))
+                }
                 if entry.session?.forkedFrom != nil {
                     Image(systemName: "arrow.triangle.branch").help(AppLocalization.text("分支会话"))
                 }
