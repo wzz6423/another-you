@@ -1,0 +1,4 @@
+# actionlint 的内置清单尚未识别 GitHub 托管的 xcode-27；使用此配置键补充标签。
+self-hosted-runner:
+  labels:
+    - xcode-27

@@ -1,0 +1,100 @@
+name: Bug report
+description: Report a reproducible problem in Another You.
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Search existing Issues first. You may write answers in English or Chinese.
+        For security vulnerabilities, follow SECURITY.md instead of disclosing details here.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Select the affected part of the project.
+      options:
+        - macOS App
+        - Agent & Models
+        - CI & Build
+        - Website
+        - Documentation
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Another You version
+      description: App version or commit SHA.
+      placeholder: e.g. 0.1.0 or abc1234
+    validations:
+      required: true
+  - type: input
+    id: macos-version
+    attributes:
+      label: macOS version and CPU
+      description: Include the macOS version and Apple Silicon or Intel CPU.
+      placeholder: e.g. macOS 27, Apple M3 Pro (arm64)
+    validations:
+      required: true
+  - type: dropdown
+    id: installation
+    attributes:
+      label: Installation or launch method
+      description: For Other, describe the method in Steps to reproduce.
+      options:
+        - Released app
+        - Run from source (make run)
+        - Self-built app (make build-package)
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Give the smallest reproduction, starting from installation or app launch.
+      placeholder: |
+        1. Launch Another You.
+        2. Describe the action that triggers the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include the visible behavior or error; remove credentials and private content.
+    validations:
+      required: true
+  - type: input
+    id: runtime
+    attributes:
+      label: Node and Swift versions (source builds)
+      description: Optional. Include these for source, sidecar, or toolchain failures when available.
+  - type: input
+    id: model
+    attributes:
+      label: Model provider and model (if relevant)
+      description: Optional. Name the provider and model without API keys, private endpoints, or prompts.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Optional. Remove tokens, private paths, and personal data before sharing.
+      render: shell
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-submission checks
+      options:
+        - label: I searched existing Issues and confirmed that this is not a duplicate.
+          required: true
+        - label: I removed sensitive information from logs and screenshots.
+          required: true

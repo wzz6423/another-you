@@ -1,0 +1,45 @@
+{
+  "label": "skip-ci",
+  "workflows": [
+    {
+      "name": "CI",
+      "file": "ci.yml",
+      "aliases": ["ci"],
+      "targets": [
+        {"id": "agent", "name": "Agent core", "aliases": ["agent", "agent-core"]},
+        {"id": "swift", "name": "SwiftUI macOS", "aliases": ["swift", "mac", "macos", "app", "xcode"]},
+        {"id": "website", "name": "Website and scripts", "aliases": ["web", "website"]}
+      ]
+    },
+    {
+      "name": "CI Lint",
+      "file": "ci-lint.yml",
+      "aliases": ["lint", "actionlint"],
+      "targets": [{"id": "lint", "name": "CI Lint", "aliases": []}]
+    },
+    {
+      "name": "CodeQL",
+      "file": "codeql.yml",
+      "aliases": ["codeql"],
+      "targets": [{"id": "codeql", "name": "CodeQL", "aliases": []}]
+    },
+    {
+      "name": "Dependency Review",
+      "file": "dependency-review.yml",
+      "aliases": ["deps", "dependencies"],
+      "targets": [{"id": "deps", "name": "Dependency Review", "aliases": []}]
+    },
+    {
+      "name": "Skill CI",
+      "file": "skill-ci.yml",
+      "aliases": ["skill", "skills"],
+      "targets": [{"id": "skills", "name": "Skill CI", "aliases": []}]
+    },
+    {
+      "name": "PR Quality Gates",
+      "file": "pr-quality-gates.yml",
+      "aliases": ["quality", "pr-quality"],
+      "targets": [{"id": "quality", "name": "PR Quality", "aliases": []}]
+    }
+  ]
+}

@@ -1,0 +1,55 @@
+name: Skill CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: Skip Gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+      issues: read
+    outputs:
+      skip: ${{ steps.gate.outputs.skip }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - id: gate
+        uses: ./.github/actions/ci-skip-gate
+        with:
+          workflow-name: Skill CI
+          github-token: ${{ github.token }}
+
+  validate:
+    name: Validate Skills
+    needs: gate
+    if: always() && needs.gate.result != 'cancelled' && (needs.gate.result != 'success' || needs.gate.outputs.skip != 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Require a successful skip gate
+        env:
+          GATE_RESULT: ${{ needs.gate.result }}
+        run: test "$GATE_RESULT" = success
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Validate project skills
+        run: |
+          ruby .github/scripts/validate-skills-test.rb
+          ruby .github/scripts/validate-skills.rb

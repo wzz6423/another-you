@@ -33,6 +33,7 @@ description: 开发、修复或评审 Another You 的原生 macOS 应用、Node/
 | 规则、状态、模型与隐私 | `agent-core/src/index.ts`、`scheduler.ts`、`state.ts`、`config.ts`、`pi-adapter.ts`；[架构](../../docs/architecture.zh-CN.md) 和[配置](../../docs/configuration.zh-CN.md)。 |
 | 构建、开发生命周期、自动更新 | [Makefile](../../Makefile)、`scripts/build-app.sh`、`scripts/dev-service.sh`、`AnotherYouCore/UpdateController.swift`、`scripts/release.py`；[发布指南](../../docs/releasing.zh-CN.md)。 |
 | 官网 | `website/index.html`、`styles.css`、`script.js`；[官网指南](../../website/README.zh-CN.md)。 |
+| GitHub CI、Issue/PR 与自动回复 | `.github/workflows/`、`.github/scripts/`、[Makefile](../../Makefile) 和[贡献指南](../../CONTRIBUTING.zh-CN.md)。 |
 
 表中 `AnotherYouCore/` 指 `macos/AnotherYou/Sources/AnotherYouCore/`。沿调用边界读相关测试，先复用现有类型、状态和工具，再写最小修改。不要引入 Zshell 的 Xcode 工程、终端后端或 Zisla 的客户端架构。
 
@@ -72,6 +73,7 @@ make pi-source      # 仅需阅读锁定上游源码时使用
 | 发布工具或更新打包 | `make test-release`、`bash -n scripts/build-app.sh`，以及受影响的真实构建/签名验证；设置 `SPARKLE_BIN` 时还运行官方 Sparkle 工具集成测试。 |
 | 更新下载、安装与退出行为 | `make test-swift`、`make test-updater-install`；后者在临时应用与本机 HTTP 通道中运行实际 Sparkle 安装，不接触个人安装。 |
 | 官网 | `make check`，按官网指南实际操作改变的页面及窄窗口布局。 |
+| GitHub CI、Issue/PR 与自动回复 | `make check-ci`、`make test-ci`、`make check-repository`；校验模板、权限、跳过/恢复与重复事件，实际线上运行和评论另行验证。 |
 | 纯文档、Skill | 检查本地链接、命令与实现一致性；文档保持中英文配对，不为文案重跑客户端测试。 |
 
 SwiftUI 修改需要运行应用并实际操作：设置从侧栏、菜单及快捷键打开，最小化、关闭、重开；同时确认主窗口可用。验证范围随改动收敛，不仅报告“构建通过”。

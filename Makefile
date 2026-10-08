@@ -3,7 +3,7 @@ SHELL := /bin/bash
 PORT ?= 4173
 SWIFT_SCRATCH_PATH ?= macos/AnotherYou/.build
 
-.PHONY: help deps build run stop update build-package check test test-agent test-swift test-scripts test-release test-updater-install website pi-source clean
+.PHONY: help deps build run stop update build-package check check-ci check-repository test test-agent test-swift test-scripts test-release test-updater-install test-ci website pi-source clean
 
 help:
 	@printf '%s\n' \
@@ -15,12 +15,15 @@ help:
 		'  make build          仅编译 Debug Swift 可执行文件，不打包或启动' \
 		'  make build-package  打包 Release .app（默认 dist/macos，拒绝覆盖）' \
 		'  make check          检查 TypeScript、官网 JavaScript 和 Shell 语法' \
+		'  make check-ci       检查 GitHub 工作流与自动化脚本语法（需要 actionlint）' \
+		'  make check-repository  检查 Git 跟踪及暂存文件中的构建产物与私人配置' \
 		'  make test           运行 Agent、Swift、开发脚本和发布工具测试' \
 		'  make test-agent     运行 Agent 测试' \
 		'  make test-swift     运行 Swift 测试' \
 		'  make test-scripts   运行工具链与隔离的开发进程生命周期测试' \
 		'  make test-release   运行发布签名、元数据和双端上传流程测试' \
 		'  make test-updater-install  在 macOS 临时应用中验证真实更新安装' \
+		'  make test-ci        运行 CI 分流、仓库卫生与贡献自动化测试' \
 		'  make website        预览官网：http://127.0.0.1:4173（PORT 可覆盖）' \
 		'  make pi-source      获取锁定的 Pi 源码' \
 		'  make clean          停止开发实例并清理已知构建、测试产物' \
@@ -52,6 +55,16 @@ check:
 	node --check website/locales.js
 	node --check website/i18n.js
 	@for file in scripts/*.sh agent-core/scripts/*.sh; do bash -n "$$file" || exit; done
+
+check-ci:
+	@for file in .github/scripts/*.rb; do ruby -c "$$file" || exit; done
+	actionlint
+
+check-repository:
+	ruby .github/scripts/check-repository-hygiene.rb
+
+test-ci:
+	@for file in .github/scripts/*-test.rb; do ruby "$$file" || exit; done
 
 test: test-agent test-swift test-scripts test-release
 

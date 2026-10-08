@@ -1,0 +1,30 @@
+{
+  "comment": "Issue Form fields and labels shared by validation and contribution automation.",
+  "areaField": "area",
+  "kinds": [
+    {
+      "kind": "bug",
+      "titlePrefix": "[Bug]",
+      "templates": ["bug_report.yml"],
+      "label": { "label": "bug", "color": "d73a4a", "description": "Something isn't working" }
+    },
+    {
+      "kind": "feature",
+      "titlePrefix": "[Feature]",
+      "templates": ["feature_request.yml"],
+      "label": { "label": "enhancement", "color": "a2eeef", "description": "New feature or request" }
+    }
+  ],
+  "areas": [
+    { "area": "macOS App", "aliases": ["macOS 应用"], "label": "area:macos", "color": "0e8a16", "description": "Native macOS interface and application behavior" },
+    { "area": "Agent & Models", "aliases": ["Agent 与模型"], "label": "area:agent", "color": "5319e7", "description": "Node sidecar, model integration, and agent behavior" },
+    { "area": "CI & Build", "aliases": ["CI 与构建"], "label": "area:ci-build", "color": "1d76db", "description": "CI, build, packaging, and updates" },
+    { "area": "Website", "aliases": ["官网"], "label": "area:website", "color": "a2eeef", "description": "Project website" },
+    { "area": "Documentation", "aliases": ["文档"], "label": "area:docs", "color": "0075ca", "description": "Documentation and contributor guidance" }
+  ],
+  "needsMoreInfoLabel": {
+    "label": "needs-more-info",
+    "color": "d876e3",
+    "description": "Required contribution metadata is incomplete or invalid"
+  }
+}

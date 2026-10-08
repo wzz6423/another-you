@@ -14,8 +14,39 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+    outputs:
+      agent: ${{ steps.paths.outputs.agent }}
+      swift: ${{ steps.paths.outputs.swift }}
+      website: ${{ steps.paths.outputs.website }}
+      targets: ${{ steps.skip.outputs.targets }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Resolve maintainer directives
+        id: skip
+        uses: ./.github/actions/ci-skip-gate
+        with:
+          workflow-name: CI
+          github-token: ${{ github.token }}
+      - name: Select checks for changed paths
+        id: paths
+        run: ruby .github/scripts/ci-paths.rb
+
   agent-core:
     name: Agent core
+    needs: changes
+    if: needs.changes.outputs.agent == 'true' && !contains(fromJSON(needs.changes.outputs.targets || '[]'), 'agent')
     runs-on: macos-15
     timeout-minutes: 15
     steps:
@@ -42,6 +73,8 @@ jobs:
 
   swift:
     name: SwiftUI macOS
+    needs: changes
+    if: needs.changes.outputs.swift == 'true' && !contains(fromJSON(needs.changes.outputs.targets || '[]'), 'swift')
     runs-on: xcode-27
     timeout-minutes: 15
     steps:
@@ -62,6 +95,10 @@ jobs:
           xcrun --sdk macosx --show-sdk-path
       - name: Install sidecar dependencies
         run: make deps
+      - name: Test Markdown renderer
+        run: |
+          npm ci --prefix macos/AnotherYou/MarkdownRenderer --ignore-scripts --no-audit --no-fund
+          npm test --prefix macos/AnotherYou/MarkdownRenderer
       - name: Build
         run: |
           make build
@@ -108,10 +145,12 @@ jobs:
           if-no-files-found: error
       - name: Clean up build artifacts
         if: always()
-        run: rm -rf macos/AnotherYou/.build agent-core/node_modules "${{ runner.temp }}/another-you-app" "${{ runner.temp }}/another-you-smoke" "${{ runner.temp }}/another-you-events.jsonl"
+        run: rm -rf macos/AnotherYou/.build agent-core/node_modules macos/AnotherYou/MarkdownRenderer/node_modules "${{ runner.temp }}/another-you-app" "${{ runner.temp }}/another-you-smoke" "${{ runner.temp }}/another-you-events.jsonl"
 
   website:
     name: Website and scripts
+    needs: changes
+    if: needs.changes.outputs.website == 'true' && !contains(fromJSON(needs.changes.outputs.targets || '[]'), 'website')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -128,5 +167,34 @@ jobs:
           make help
           test -s website/index.html
           for file in website/*.js; do node --check "$file"; done
+          node --test website/i18n.test.cjs
           for file in scripts/*.sh agent-core/scripts/*.sh; do bash -n "$file"; done
           git diff --check
+
+  result:
+    name: CI result
+    needs: [changes, agent-core, swift, website]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify required results
+        env:
+          CI_NEEDS: ${{ toJSON(needs) }}
+        run: |
+          ruby <<'RUBY'
+          require 'json'
+          needs = JSON.parse(ENV.fetch('CI_NEEDS'))
+          gate = needs.fetch('changes')
+          abort 'CI 路径检查未成功。' unless gate.fetch('result') == 'success'
+          skipped = JSON.parse(gate.fetch('outputs').fetch('targets'))
+          abort 'CI skip 输出无效。' unless skipped.is_a?(Array) && skipped.all? { |target| target.is_a?(String) }
+          { 'agent-core' => 'agent', 'swift' => 'swift', 'website' => 'website' }.each do |job, output|
+            enabled = gate.fetch('outputs').fetch(output)
+            abort "CI 路径输出无效：#{output}" unless %w[true false].include?(enabled)
+            expected = enabled == 'true' && !skipped.include?(output) ? 'success' : 'skipped'
+            actual = needs.fetch(job).fetch('result')
+            abort "#{job} 预期 #{expected}，实际 #{actual}。" unless actual == expected
+          end
+          puts '全部适用的 CI 检查通过。'
+          RUBY

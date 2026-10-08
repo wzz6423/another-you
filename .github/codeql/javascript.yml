@@ -1,0 +1,10 @@
+name: Another You JavaScript and TypeScript
+paths:
+  - agent-core
+  - website
+  - scripts
+  - macos/AnotherYou/MarkdownRenderer
+paths-ignore:
+  - '**/node_modules/**'
+  - agent-core/vendor/**
+  - agent-core/.cache/**

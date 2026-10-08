@@ -1,0 +1,68 @@
+name: PR Quality Gates
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: Skip Gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+    outputs:
+      skip: ${{ steps.gate.outputs.skip }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - id: gate
+        uses: ./.github/actions/ci-skip-gate
+        with:
+          workflow-name: PR Quality Gates
+          github-token: ${{ github.token }}
+
+  validate:
+    name: PR Quality
+    needs: gate
+    if: always() && needs.gate.result != 'cancelled' && (needs.gate.result != 'success' || needs.gate.outputs.skip != 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require a successful skip gate
+        env:
+          GATE_RESULT: ${{ needs.gate.result }}
+        run: test "$GATE_RESULT" = success
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Validate title and body
+        if: github.event.pull_request.user.type != 'Bot' || github.event.pull_request.user.login != 'dependabot[bot]'
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$PR_TITLE" > "$RUNNER_TEMP/pr-title.txt"
+          printf '%s' "$PR_BODY" > "$RUNNER_TEMP/pr-body.md"
+          ruby .github/scripts/pr-metadata.rb validate \
+            --title-file "$RUNNER_TEMP/pr-title.txt" \
+            --body-file "$RUNNER_TEMP/pr-body.md"
+      - name: Explain Dependabot metadata exemption
+        if: github.event.pull_request.user.type == 'Bot' && github.event.pull_request.user.login == 'dependabot[bot]'
+        run: echo 'Dependabot uses generated metadata. Build, test, and security checks still apply.'
+      - name: Remove pull request metadata files
+        if: always()
+        run: rm -f "$RUNNER_TEMP/pr-title.txt" "$RUNNER_TEMP/pr-body.md"

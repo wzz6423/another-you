@@ -1,0 +1,132 @@
+name: CI Lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: CI Lint gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+    outputs:
+      skip: ${{ steps.skip.outputs.skip }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Resolve maintainer directives
+        id: skip
+        uses: ./.github/actions/ci-skip-gate
+        with:
+          workflow-name: CI Lint
+          github-token: ${{ github.token }}
+
+  lint:
+    name: Lint workflows
+    needs: gate
+    if: always() && needs.gate.result != 'cancelled' && (needs.gate.result != 'success' || needs.gate.outputs.skip != 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify gate succeeded
+        env:
+          GATE_RESULT: ${{ needs.gate.result }}
+        run: test "$GATE_RESULT" = success
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Install actionlint
+        env:
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+          ACTIONLINT_VERSION: 1.7.12
+        run: |
+          archive="$RUNNER_TEMP/actionlint.tar.gz"
+          curl --fail --location --retry 3 --retry-all-errors \
+            --output "$archive" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          printf '%s  %s\n' "$ACTIONLINT_SHA256" "$archive" | sha256sum --check -
+          tar -xzf "$archive" -C "$RUNNER_TEMP" actionlint
+          printf '%s\n' "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      - name: Check workflows and script syntax
+        run: make check-ci
+      - name: Remove actionlint artifacts
+        if: always()
+        run: rm -f "$RUNNER_TEMP/actionlint" "$RUNNER_TEMP/actionlint.tar.gz"
+
+  scripts:
+    name: Test CI scripts
+    needs: gate
+    if: always() && needs.gate.result != 'cancelled' && (needs.gate.result != 'success' || needs.gate.outputs.skip != 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify gate succeeded
+        env:
+          GATE_RESULT: ${{ needs.gate.result }}
+        run: test "$GATE_RESULT" = success
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Test contribution automation and CI routing
+        run: make test-ci
+
+  security:
+    name: Audit workflow security
+    needs: gate
+    if: always() && needs.gate.result != 'cancelled' && (needs.gate.result != 'success' || needs.gate.outputs.skip != 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify gate succeeded
+        env:
+          GATE_RESULT: ${{ needs.gate.result }}
+        run: test "$GATE_RESULT" = success
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Audit workflows, actions and Dependabot
+        uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
+        with:
+          advanced-security: false
+          annotations: true
+          inputs: .github
+          collect: all
+          online-audits: false
+          color: false
+          version: 1.29.0
+
+  repository:
+    name: Repository hygiene
+    needs: gate
+    if: always() && needs.gate.result != 'cancelled' && (needs.gate.result != 'success' || needs.gate.outputs.skip != 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify gate succeeded
+        env:
+          GATE_RESULT: ${{ needs.gate.result }}
+        run: test "$GATE_RESULT" = success
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Check committed files
+        run: make check-repository

@@ -1,0 +1,51 @@
+name: CI Skip Gate
+description: Resolve maintainer directives with the default branch code and live GitHub permissions.
+
+inputs:
+  workflow-name:
+    description: Workflow name in .github/ci-skip.json.
+    required: true
+  github-token:
+    description: Read-only token for comments, workflow runs and collaborator permissions.
+    required: true
+
+outputs:
+  skip:
+    description: Whether all targets in this workflow were explicitly skipped.
+    value: ${{ steps.resolve.outputs.skip }}
+  targets:
+    description: JSON array of skipped target IDs for the current PR head.
+    value: ${{ steps.resolve.outputs.targets }}
+  head-sha:
+    description: PR head SHA used to resolve the directives.
+    value: ${{ steps.resolve.outputs.head-sha }}
+
+runs:
+  using: composite
+  steps:
+    - name: Checkout trusted skip resolver
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      with:
+        repository: ${{ github.repository }}
+        ref: ${{ github.event.repository.default_branch }}
+        path: .ci-trusted
+        persist-credentials: false
+    - name: Resolve current head directives
+      id: resolve
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        WORKFLOW_NAME: ${{ inputs.workflow-name }}
+      run: |
+        if [[ -f .ci-trusted/.github/scripts/ci-skip-directives.rb && -f .ci-trusted/.github/ci-skip.json ]]; then
+          ruby .ci-trusted/.github/scripts/ci-skip-directives.rb gate
+        else
+          printf '%s\n' 'skip=false' 'targets=[]' 'head-sha=' >> "$GITHUB_OUTPUT"
+          echo 'Default branch skip resolver is not available yet; all checks run normally.'
+        fi
+    - name: Remove trusted resolver checkout
+      if: always()
+      shell: bash
+      run: rm -rf -- .ci-trusted

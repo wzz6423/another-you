@@ -1,0 +1,26 @@
+{
+  "comment": "Pull request metadata shared by PR Quality and contribution automation. No GitHub Project cards are created.",
+  "types": [
+    { "type": "feat", "label": "enhancement", "color": "a2eeef", "description": "New feature or request" },
+    { "type": "fix", "label": "bug", "color": "d73a4a", "description": "Something isn't working" },
+    { "type": "docs", "label": "documentation", "color": "0075ca", "description": "Improvements or additions to documentation" },
+    { "type": "style", "label": "style", "color": "c5def5", "description": "Formatting only, no behavior change" },
+    { "type": "refactor", "label": "refactor", "color": "fbca04", "description": "Restructuring without behavior change" },
+    { "type": "perf", "label": "performance", "color": "0e8a16", "description": "Performance improvement" },
+    { "type": "test", "label": "test", "color": "bfd4f2", "description": "Tests only" },
+    { "type": "chore", "label": "chore", "color": "ededed", "description": "Maintenance work" },
+    { "type": "build", "label": "build", "color": "5319e7", "description": "Build system or packaging" },
+    { "type": "ci", "label": "ci", "color": "1d76db", "description": "Continuous integration and automation" },
+    { "type": "revert", "label": "revert", "color": "b60205", "description": "Reverts a previous change" }
+  ],
+  "issueLabel": {
+    "label": "development",
+    "color": "0052cc",
+    "description": "Contains a closing reference to a GitHub issue"
+  },
+  "needsMoreInfoLabel": {
+    "label": "needs-more-info",
+    "color": "d876e3",
+    "description": "Required contribution metadata is incomplete or invalid"
+  }
+}
