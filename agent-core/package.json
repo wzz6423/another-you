@@ -13,13 +13,13 @@
     "check": "tsc --noEmit"
   },
   "dependencies": {
-    "@earendil-works/pi-agent-core": "0.99.2",
-    "@earendil-works/pi-ai": "0.99.2",
-    "@earendil-works/pi-coding-agent": "0.99.2",
+    "@earendil-works/pi-agent-core": "1.0.2",
+    "@earendil-works/pi-ai": "1.0.2",
+    "@earendil-works/pi-coding-agent": "1.0.2",
     "playwright-core": "1.63.0"
   },
   "devDependencies": {
-    "@types/node": "22.19.19",
-    "typescript": "5.9.3"
+    "@types/node": "26.6.4",
+    "typescript": "7.0.2"
   }
 }
